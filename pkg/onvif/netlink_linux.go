@@ -18,10 +18,10 @@ type SetupMacVLANResult struct {
 	StaticIP   string `json:"static_ip,omitempty"`
 }
 
-// CleanupMacVLANInterfaces removes all virtual network interfaces matching prefixes (e.g. go2rtc_onvif_, rtsp2onvif_, go2rc_onvif_).
+// CleanupMacVLANInterfaces removes all virtual network interfaces matching prefixes (e.g. go2rtc_, go2rtc_onvif_, rtsp2onvif_).
 func CleanupMacVLANInterfaces(prefixes ...string) []string {
 	if len(prefixes) == 0 {
-		prefixes = []string{"go2rtc_onvif_", "rtsp2onvif_", "go2rc_onvif_"}
+		prefixes = []string{"go2rtc_", "go2rtc_onvif_", "rtsp2onvif_", "go2rc_onvif_"}
 	}
 	ifaces, err := net.Interfaces()
 	if err != nil {

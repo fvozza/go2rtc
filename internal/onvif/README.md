@@ -47,7 +47,7 @@ streams:
 ```
 
 *Every selected stream receives:*
-- Isolated MacVLAN interface (`go2rtc_onvif_0`, `go2rtc_onvif_1`, etc.).
+- Isolated MacVLAN interface (`go2rtc_0`, `go2rtc_1`, etc.).
 - Unique DHCP IP address (e.g. `192.168.1.181`, `192.168.1.182`).
 - Isolated ONVIF Profile S SOAP service exposing **only that single stream** as `MainStream`.
 - Snapshot endpoint (`http://<virtual_ip>:80/snapshot.png` redirecting to frame JPEG).
