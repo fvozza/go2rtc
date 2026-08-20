@@ -265,7 +265,7 @@ func setupDevice(id string, conf *DeviceConfig, globalCfg *Config, idx int) {
 		_ = app.PatchConfig([]string{"onvif", "devices", id, "uuid"}, conf.UUID)
 	}
 
-	// 1. MacVLAN Provisioning (starts with go2rtc_ and <= 15 chars)
+	// 1. MacVLAN Provisioning (strictly go2rtc_<idx>)
 	if conf.Dev != "" {
 		if conf.MAC == "" {
 			conf.MAC = onvif.GenerateNetworkMAC()
@@ -273,14 +273,7 @@ func setupDevice(id string, conf *DeviceConfig, globalCfg *Config, idx int) {
 			_ = app.PatchConfig([]string{"onvif", "devices", id, "mac"}, conf.MAC)
 		}
 
-		cleanID := strings.ReplaceAll(strings.ReplaceAll(id, " ", "_"), "/", "_")
-		candidate := "go2rtc_" + cleanID
-		var vlanName string
-		if len(candidate) <= 15 {
-			vlanName = candidate
-		} else {
-			vlanName = fmt.Sprintf("go2rtc_%d", idx)
-		}
+		vlanName := fmt.Sprintf("go2rtc_%d", idx)
 
 		log.Info().
 			Str("device", id).
