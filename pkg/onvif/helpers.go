@@ -173,3 +173,91 @@ func GetPath(urlOrPath, defPath string) string {
 	}
 	return GetPath(u.Path, defPath)
 }
+
+// GenerateNetworkMAC generates a random Unicast LAA (Locally Administered Address) MAC address with prefix 1A:11:B0
+func GenerateNetworkMAC() string {
+	s := strings.ToUpper(core.RandString(6, 16))
+	return fmt.Sprintf("1A:11:B0:%s:%s:%s", s[0:2], s[2:4], s[4:6])
+}
+
+// GetIPv4FromMAC finds the IPv4 address assigned to the network interface with the given MAC address.
+func GetIPv4FromMAC(macAddress string) string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	targetMac := strings.ToLower(strings.TrimSpace(macAddress))
+	for _, iface := range ifaces {
+		if strings.ToLower(iface.HardwareAddr.String()) == targetMac {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+					if ip4 := ipnet.IP.To4(); ip4 != nil {
+						return ip4.String()
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// WaitForIPv4FromMAC polls network interfaces until an IPv4 address is assigned to the given MAC, or timeout expires.
+func WaitForIPv4FromMAC(macAddress string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		ip := GetIPv4FromMAC(macAddress)
+		if ip != "" {
+			return ip, nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return "", fmt.Errorf("timeout waiting for DHCP IPv4 on MAC %s", macAddress)
+}
+
+// ListAllNetworkInterfaces returns a list of human-readable summaries for all system network interfaces.
+func ListAllNetworkInterfaces() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return []string{fmt.Sprintf("error reading interfaces: %v", err)}
+	}
+	var res []string
+	for _, iface := range ifaces {
+		var ips []string
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			ips = append(ips, addr.String())
+		}
+		res = append(res, fmt.Sprintf("%s (flags=%v, mac=%s, addrs=%v)", iface.Name, iface.Flags, iface.HardwareAddr, ips))
+	}
+	return res
+}
+
+// GetInterfaceIPv4 returns the first non-loopback IPv4 address for a named network interface.
+func GetInterfaceIPv4(ifaceName string) string {
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return ""
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return ""
+	}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ip4 := ipnet.IP.To4(); ip4 != nil {
+				return ip4.String()
+			}
+		}
+	}
+	return ""
+}
+
+
+

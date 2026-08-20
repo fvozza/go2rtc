@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/AlexxIT/go2rtc/internal/app"
 	"github.com/AlexxIT/go2rtc/internal/streams"
@@ -78,6 +79,17 @@ func Init() {
 	}()
 }
 
+type StreamResolver func(path string, hostOrIP string) *streams.Stream
+
+var streamResolvers []StreamResolver
+var streamResolversMu sync.RWMutex
+
+func AddStreamResolver(resolver StreamResolver) {
+	streamResolversMu.Lock()
+	defer streamResolversMu.Unlock()
+	streamResolvers = append(streamResolvers, resolver)
+}
+
 type Handler func(conn *rtsp.Conn) bool
 
 func HandleFunc(handler Handler) {
@@ -143,6 +155,26 @@ func rtspHandler(rawURL string) (core.Producer, error) {
 	return conn, nil
 }
 
+// Listen starts an additional RTSP TCP listener on the specified address.
+func Listen(address string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	log.Info().Str("addr", address).Msg("[rtsp] listen")
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c := rtsp.NewServer(conn)
+			go tcpHandler(c)
+		}
+	}()
+	return ln, nil
+}
+
 func tcpHandler(conn *rtsp.Conn) {
 	var name string
 	var closer func()
@@ -162,15 +194,70 @@ func tcpHandler(conn *rtsp.Conn) {
 
 		switch msg {
 		case rtsp.MethodDescribe:
-			if len(conn.URL.Path) == 0 {
-				log.Warn().Msg("[rtsp] server empty URL on DESCRIBE")
-				return
+			name = strings.Trim(conn.URL.Path, "/")
+			if name == "" {
+				name = "main_stream"
 			}
 
-			name = conn.URL.Path[1:]
-
 			stream := streams.Get(name)
+			if stream == nil && len(conn.URL.Path) > 1 {
+				stream = streams.Get(conn.URL.Path[1:])
+			}
+			if stream == nil && strings.HasSuffix(conn.URL.Path, "/") {
+				stream = streams.Get(strings.TrimSuffix(conn.URL.Path[1:], "/"))
+			}
+
+			// 1. Case-insensitive lookup
 			if stream == nil {
+				nameLower := strings.ToLower(name)
+				for _, sName := range streams.GetAllNames() {
+					if strings.ToLower(sName) == nameLower {
+						stream = streams.Get(sName)
+						name = sName
+						break
+					}
+				}
+			}
+
+			// 2. Virtual IP / ONVIF custom stream resolvers
+			if stream == nil {
+				host := ""
+				if conn.URL != nil && conn.URL.Hostname() != "" {
+					host = conn.URL.Hostname()
+				}
+				if host == "" && conn.LocalAddr() != nil {
+					if tcpAddr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+						host = tcpAddr.IP.String()
+					}
+				}
+
+				streamResolversMu.RLock()
+				for _, resolver := range streamResolvers {
+					if s := resolver(conn.URL.Path, host); s != nil {
+						stream = s
+						break
+					}
+				}
+				streamResolversMu.RUnlock()
+			}
+
+			// 3. Fallback if only 1 stream exists in go2rtc
+			if stream == nil {
+				all := streams.GetAllNames()
+				if len(all) == 1 {
+					stream = streams.Get(all[0])
+					name = all[0]
+					log.Debug().Str("path", conn.URL.Path).Str("stream", all[0]).Msg("[rtsp] mapped single stream fallback")
+				}
+			}
+
+			if stream == nil {
+				log.Warn().
+					Str("path", conn.URL.Path).
+					Str("name", name).
+					Str("remote", conn.Connection.RemoteAddr).
+					Interface("available_streams", streams.GetAllNames()).
+					Msg("[rtsp] stream not found on DESCRIBE (sending 404)")
 				return
 			}
 

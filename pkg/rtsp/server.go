@@ -28,6 +28,13 @@ func NewServer(conn net.Conn) *Conn {
 	}
 }
 
+func (c *Conn) LocalAddr() net.Addr {
+	if c.conn != nil {
+		return c.conn.LocalAddr()
+	}
+	return nil
+}
+
 func (c *Conn) Auth(username, password string) {
 	info := url.UserPassword(username, password)
 	c.auth = tcp.NewAuth(info)

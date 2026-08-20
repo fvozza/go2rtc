@@ -3,6 +3,7 @@ package onvif
 import (
 	"bytes"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -40,6 +41,465 @@ const (
 	MediaGetVideoSourceConfiguration         = "GetVideoSourceConfiguration"
 	MediaGetVideoSourceConfigurations        = "GetVideoSourceConfigurations"
 )
+
+type MediaProfile struct {
+	Token       string  `json:"token"`
+	Name        string  `json:"name"`
+	Width       int     `json:"width"`
+	Height      int     `json:"height"`
+	Framerate   int     `json:"framerate"`
+	Bitrate     int     `json:"bitrate"` // in kbps
+	Quality     float64 `json:"quality"`
+	GovLength   int     `json:"gov_length"`
+	H264Profile string  `json:"h264_profile"` // "Main", "High", "Baseline"
+	Encoding    string  `json:"encoding"`     // "H264", "H265"
+	StreamURI   string  `json:"stream_uri"`
+	SnapshotURI string  `json:"snapshot_uri"`
+}
+
+type ServerDevice struct {
+	Name            string          `json:"name"`
+	Manufacturer    string          `json:"manufacturer"`
+	Model           string          `json:"model"`
+	FirmwareVersion string          `json:"firmware_version"`
+	SerialNumber    string          `json:"serial_number"`
+	HardwareID      string          `json:"hardware_id"`
+	Profiles        []*MediaProfile `json:"profiles"`
+}
+
+func (d *ServerDevice) FindProfile(token string) *MediaProfile {
+	for _, p := range d.Profiles {
+		if p.Token == token || p.Name == token || "vsc_"+p.Token == token || "vec_"+p.Token == token || "vsrc_"+p.Token == token {
+			return p
+		}
+	}
+	return nil
+}
+
+func (d *ServerDevice) GetProfilesResponse() []byte {
+	e := NewEnvelope()
+	e.Append(`<trt:GetProfilesResponse>`)
+	for _, p := range d.Profiles {
+		d.appendProfile(e, "Profiles", p)
+	}
+	e.Append(`</trt:GetProfilesResponse>`)
+	return e.Bytes()
+}
+
+func (d *ServerDevice) GetProfileResponse(token string) []byte {
+	p := d.FindProfile(token)
+	if p == nil && len(d.Profiles) > 0 {
+		p = d.Profiles[0]
+	}
+	e := NewEnvelope()
+	e.Append(`<trt:GetProfileResponse>`)
+	if p != nil {
+		d.appendProfile(e, "Profile", p)
+	}
+	e.Append(`</trt:GetProfileResponse>`)
+	return e.Bytes()
+}
+
+func (d *ServerDevice) appendProfile(e *Envelope, tag string, p *MediaProfile) {
+	width := p.Width
+	if width <= 0 {
+		width = 1920
+	}
+	height := p.Height
+	if height <= 0 {
+		height = 1080
+	}
+	fps := p.Framerate
+	if fps <= 0 {
+		fps = 30
+	}
+	bitrate := p.Bitrate
+	if bitrate <= 0 {
+		bitrate = 4096
+	}
+	gov := p.GovLength
+	if gov <= 0 {
+		gov = fps
+	}
+	encoding := p.Encoding
+	if encoding == "" {
+		encoding = "H264"
+	}
+	h264Profile := p.H264Profile
+	if h264Profile == "" {
+		h264Profile = "Main"
+	}
+
+	e.Appendf(`<trt:%s token="%s" fixed="true">`, tag, p.Token)
+	e.Appendf(`<tt:Name>%s</tt:Name>`, p.Name)
+	e.Appendf(`<tt:VideoSourceConfiguration token="vsc_%s" fixed="true">
+	<tt:Name>VSC_%s</tt:Name>
+	<tt:UseCount>1</tt:UseCount>
+	<tt:SourceToken>vsrc_%s</tt:SourceToken>
+	<tt:Bounds x="0" y="0" width="%d" height="%d"></tt:Bounds>
+</tt:VideoSourceConfiguration>`, p.Token, p.Name, p.Token, width, height)
+
+	e.Appendf(`<tt:VideoEncoderConfiguration token="vec_%s">
+	<tt:Name>VEC_%s</tt:Name>
+	<tt:UseCount>1</tt:UseCount>
+	<tt:Encoding>%s</tt:Encoding>
+	<tt:Resolution><tt:Width>%d</tt:Width><tt:Height>%d</tt:Height></tt:Resolution>
+	<tt:Quality>%g</tt:Quality>
+	<tt:RateControl><tt:FrameRateLimit>%d</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>%d</tt:BitrateLimit></tt:RateControl>
+	<tt:H264><tt:GovLength>%d</tt:GovLength><tt:H264Profile>%s</tt:H264Profile></tt:H264>
+	<tt:SessionTimeout>PT10S</tt:SessionTimeout>
+</tt:VideoEncoderConfiguration>`, p.Token, p.Name, encoding, width, height, p.Quality, fps, bitrate, gov, h264Profile)
+
+	e.Appendf(`</trt:%s>`, tag)
+}
+
+func (d *ServerDevice) GetVideoSourcesResponse() []byte {
+	e := NewEnvelope()
+	e.Append(`<trt:GetVideoSourcesResponse>`)
+	for _, p := range d.Profiles {
+		width := p.Width
+		if width <= 0 {
+			width = 1920
+		}
+		height := p.Height
+		if height <= 0 {
+			height = 1080
+		}
+		fps := p.Framerate
+		if fps <= 0 {
+			fps = 30
+		}
+		e.Appendf(`<trt:VideoSources token="vsrc_%s">
+	<tt:Framerate>%d.000000</tt:Framerate>
+	<tt:Resolution><tt:Width>%d</tt:Width><tt:Height>%d</tt:Height></tt:Resolution>
+</trt:VideoSources>`, p.Token, fps, width, height)
+	}
+	e.Append(`</trt:GetVideoSourcesResponse>`)
+	return e.Bytes()
+}
+
+func (d *ServerDevice) GetVideoSourceConfigurationsResponse() []byte {
+	e := NewEnvelope()
+	e.Append(`<trt:GetVideoSourceConfigurationsResponse>`)
+	for _, p := range d.Profiles {
+		width := p.Width
+		if width <= 0 {
+			width = 1920
+		}
+		height := p.Height
+		if height <= 0 {
+			height = 1080
+		}
+		e.Appendf(`<tt:Configurations token="vsc_%s" fixed="true">
+	<tt:Name>VSC_%s</tt:Name>
+	<tt:UseCount>1</tt:UseCount>
+	<tt:SourceToken>vsrc_%s</tt:SourceToken>
+	<tt:Bounds x="0" y="0" width="%d" height="%d"></tt:Bounds>
+</tt:Configurations>`, p.Token, p.Name, p.Token, width, height)
+	}
+	e.Append(`</trt:GetVideoSourceConfigurationsResponse>`)
+	return e.Bytes()
+}
+
+func (d *ServerDevice) GetVideoEncoderConfigurationsResponse() []byte {
+	e := NewEnvelope()
+	e.Append(`<trt:GetVideoEncoderConfigurationsResponse>`)
+	for _, p := range d.Profiles {
+		d.appendVideoEncoderConfig(e, "Configurations", p)
+	}
+	e.Append(`</trt:GetVideoEncoderConfigurationsResponse>`)
+	return e.Bytes()
+}
+
+func (d *ServerDevice) appendVideoEncoderConfig(e *Envelope, tag string, p *MediaProfile) {
+	width := p.Width
+	if width <= 0 {
+		width = 1920
+	}
+	height := p.Height
+	if height <= 0 {
+		height = 1080
+	}
+	fps := p.Framerate
+	if fps <= 0 {
+		fps = 30
+	}
+	bitrate := p.Bitrate
+	if bitrate <= 0 {
+		bitrate = 4096
+	}
+	gov := p.GovLength
+	if gov <= 0 {
+		gov = fps
+	}
+	encoding := p.Encoding
+	if encoding == "" {
+		encoding = "H264"
+	}
+	h264Profile := p.H264Profile
+	if h264Profile == "" {
+		h264Profile = "Main"
+	}
+
+	e.Appendf(`<tt:%s token="vec_%s">
+	<tt:Name>VEC_%s</tt:Name>
+	<tt:UseCount>1</tt:UseCount>
+	<tt:Encoding>%s</tt:Encoding>
+	<tt:Resolution><tt:Width>%d</tt:Width><tt:Height>%d</tt:Height></tt:Resolution>
+	<tt:Quality>%g</tt:Quality>
+	<tt:RateControl><tt:FrameRateLimit>%d</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>%d</tt:BitrateLimit></tt:RateControl>
+	<tt:H264><tt:GovLength>%d</tt:GovLength><tt:H264Profile>%s</tt:H264Profile></tt:H264>
+	<tt:SessionTimeout>PT10S</tt:SessionTimeout>
+</tt:%s>`, tag, p.Token, p.Name, encoding, width, height, p.Quality, fps, bitrate, gov, h264Profile, tag)
+}
+
+func (d *ServerDevice) GetStreamUri(token string) string {
+	p := d.FindProfile(token)
+	if p != nil && p.StreamURI != "" {
+		return p.StreamURI
+	}
+	if len(d.Profiles) > 0 {
+		return d.Profiles[0].StreamURI
+	}
+	return ""
+}
+
+func (d *ServerDevice) GetSnapshotUri(token string) string {
+	p := d.FindProfile(token)
+	if p != nil && p.SnapshotURI != "" {
+		return p.SnapshotURI
+	}
+	if len(d.Profiles) > 0 {
+		return d.Profiles[0].SnapshotURI
+	}
+	return ""
+}
+
+func (d *ServerDevice) GetDeviceInformationResponse() []byte {
+	manuf := d.Manufacturer
+	if manuf == "" {
+		manuf = "go2rtc"
+	}
+	model := d.Model
+	if model == "" {
+		model = d.Name
+	}
+	firmware := d.FirmwareVersion
+	if firmware == "" {
+		firmware = "1.0.0"
+	}
+	serial := d.SerialNumber
+	if serial == "" {
+		serial = strings.ReplaceAll(d.Name, " ", "_") + "-0000"
+	}
+	hwID := d.HardwareID
+	if hwID == "" {
+		hwID = "1.00"
+	}
+	e := NewEnvelope()
+	e.Appendf(`<tds:GetDeviceInformationResponse>
+	<tds:Manufacturer>%s</tds:Manufacturer>
+	<tds:Model>%s</tds:Model>
+	<tds:FirmwareVersion>%s</tds:FirmwareVersion>
+	<tds:SerialNumber>%s</tds:SerialNumber>
+	<tds:HardwareId>%s</tds:HardwareId>
+</tds:GetDeviceInformationResponse>`, manuf, model, firmware, serial, hwID)
+	return e.Bytes()
+}
+
+func (d *ServerDevice) GetCapabilitiesResponse(host string) []byte {
+	maxProfiles := len(d.Profiles)
+	if maxProfiles <= 0 {
+		maxProfiles = 2
+	}
+	e := NewEnvelope()
+	e.Appendf(`<tds:GetCapabilitiesResponse>
+	<tds:Capabilities>
+		<tt:Device>
+			<tt:XAddr>http://%s/onvif/device_service</tt:XAddr>
+			<tt:Network>
+				<tt:IPFilter>false</tt:IPFilter>
+				<tt:ZeroConfiguration>false</tt:ZeroConfiguration>
+				<tt:IPVersion6>false</tt:IPVersion6>
+				<tt:DynDNS>false</tt:DynDNS>
+			</tt:Network>
+			<tt:System>
+				<tt:DiscoveryResolve>false</tt:DiscoveryResolve>
+				<tt:DiscoveryBye>false</tt:DiscoveryBye>
+				<tt:RemoteDiscovery>false</tt:RemoteDiscovery>
+				<tt:SystemBackup>false</tt:SystemBackup>
+				<tt:SystemLogging>false</tt:SystemLogging>
+				<tt:FirmwareUpgrade>false</tt:FirmwareUpgrade>
+				<tt:SupportedVersions>
+					<tt:Major>2</tt:Major>
+					<tt:Minor>5</tt:Minor>
+				</tt:SupportedVersions>
+			</tt:System>
+			<tt:IO>
+				<tt:InputConnectors>0</tt:InputConnectors>
+				<tt:RelayOutputs>1</tt:RelayOutputs>
+			</tt:IO>
+			<tt:Security>
+				<tt:TLS1.1>false</tt:TLS1.1>
+				<tt:TLS1.2>false</tt:TLS1.2>
+				<tt:OnboardKeyGeneration>false</tt:OnboardKeyGeneration>
+				<tt:AccessPolicyConfig>false</tt:AccessPolicyConfig>
+				<tt:X.509Token>false</tt:X.509Token>
+				<tt:SAMLToken>false</tt:SAMLToken>
+				<tt:KerberosToken>false</tt:KerberosToken>
+				<tt:RELToken>false</tt:RELToken>
+			</tt:Security>
+		</tt:Device>
+		<tt:Media>
+			<tt:XAddr>http://%s/onvif/media_service</tt:XAddr>
+			<tt:StreamingCapabilities>
+				<tt:RTPMulticast>false</tt:RTPMulticast>
+				<tt:RTP_TCP>true</tt:RTP_TCP>
+				<tt:RTP_RTSP_TCP>true</tt:RTP_RTSP_TCP>
+			</tt:StreamingCapabilities>
+			<tt:Extension>
+				<tt:ProfileCapabilities>
+					<tt:MaximumNumberOfProfiles>%d</tt:MaximumNumberOfProfiles>
+				</tt:ProfileCapabilities>
+			</tt:Extension>
+		</tt:Media>
+	</tds:Capabilities>
+</tds:GetCapabilitiesResponse>`, host, host, maxProfiles)
+	return e.Bytes()
+}
+
+func (d *ServerDevice) GetScopesResponse() []byte {
+	e := NewEnvelope()
+	e.Append(`<tds:GetScopesResponse>`)
+	e.Appendf(`<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/name/%s</tt:ScopeItem></tds:Scopes>`, d.Name)
+	e.Append(`<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/location/github</tt:ScopeItem></tds:Scopes>`)
+	e.Append(`<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/Profile/Streaming</tt:ScopeItem></tds:Scopes>`)
+	e.Append(`<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/type/Network_Video_Transmitter</tt:ScopeItem></tds:Scopes>`)
+	e.Append(`<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/type/video_encoder</tt:ScopeItem></tds:Scopes>`)
+	e.Append(`<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/type/ptz</tt:ScopeItem></tds:Scopes>`)
+	e.Append(`<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/hardware/onvif</tt:ScopeItem></tds:Scopes>`)
+	e.Append(`</tds:GetScopesResponse>`)
+	return e.Bytes()
+}
+
+func (d *ServerDevice) HandleRequest(req []byte, host string) []byte {
+	operation := GetRequestAction(req)
+	if operation == "" {
+		return nil
+	}
+
+	switch operation {
+	case ServiceGetServiceCapabilities,
+		DeviceGetNetworkInterfaces,
+		DeviceGetDNS,
+		DeviceGetHostname,
+		DeviceGetNetworkDefaultGateway,
+		DeviceGetNetworkProtocols,
+		DeviceGetNTP,
+		DeviceGetDiscoveryMode,
+		DeviceSetSystemDateAndTime,
+		DeviceSystemReboot,
+		MediaGetAudioEncoderConfigurations,
+		MediaGetAudioSources,
+		MediaGetAudioSourceConfigurations,
+		MediaGetVideoEncoderConfigurationOptions:
+		return StaticResponse(operation)
+
+	case DeviceGetSystemDateAndTime:
+		return GetSystemDateAndTimeResponse()
+
+	case DeviceGetCapabilities:
+		return d.GetCapabilitiesResponse(host)
+
+	case DeviceGetServices:
+		return GetServicesResponse(host)
+
+	case DeviceGetDeviceInformation:
+		return d.GetDeviceInformationResponse()
+
+	case DeviceGetScopes:
+		return d.GetScopesResponse()
+
+	case MediaGetProfiles:
+		return d.GetProfilesResponse()
+
+	case MediaGetProfile:
+		token := FindTagValue(req, "ProfileToken")
+		return d.GetProfileResponse(token)
+
+	case MediaGetVideoSources:
+		return d.GetVideoSourcesResponse()
+
+	case MediaGetVideoSourceConfigurations:
+		return d.GetVideoSourceConfigurationsResponse()
+
+	case MediaGetVideoSourceConfiguration:
+		token := FindTagValue(req, "ConfigurationToken")
+		p := d.FindProfile(token)
+		if p == nil {
+			token = FindTagValue(req, "ProfileToken")
+			p = d.FindProfile(token)
+		}
+		if p == nil && len(d.Profiles) > 0 {
+			p = d.Profiles[0]
+		}
+		width := 1920
+		height := 1080
+		name := token
+		if p != nil {
+			if p.Width > 0 {
+				width = p.Width
+			}
+			if p.Height > 0 {
+				height = p.Height
+			}
+			name = p.Name
+		}
+		e := NewEnvelope()
+		e.Appendf(`<trt:GetVideoSourceConfigurationResponse>
+	<tt:Configuration token="%s" fixed="true">
+		<tt:Name>VSC_%s</tt:Name>
+		<tt:UseCount>1</tt:UseCount>
+		<tt:SourceToken>vsrc_%s</tt:SourceToken>
+		<tt:Bounds x="0" y="0" width="%d" height="%d"></tt:Bounds>
+	</tt:Configuration>
+</trt:GetVideoSourceConfigurationResponse>`, token, name, token, width, height)
+		return e.Bytes()
+
+	case MediaGetVideoEncoderConfigurations:
+		return d.GetVideoEncoderConfigurationsResponse()
+
+	case MediaGetVideoEncoderConfiguration:
+		token := FindTagValue(req, "ConfigurationToken")
+		p := d.FindProfile(token)
+		if p == nil {
+			token = FindTagValue(req, "ProfileToken")
+			p = d.FindProfile(token)
+		}
+		if p == nil && len(d.Profiles) > 0 {
+			p = d.Profiles[0]
+		}
+		e := NewEnvelope()
+		e.Append(`<trt:GetVideoEncoderConfigurationResponse>`)
+		if p != nil {
+			d.appendVideoEncoderConfig(e, "Configuration", p)
+		}
+		e.Append(`</trt:GetVideoEncoderConfigurationResponse>`)
+		return e.Bytes()
+
+	case MediaGetStreamUri:
+		token := FindTagValue(req, "ProfileToken")
+		uri := d.GetStreamUri(token)
+		return GetStreamUriResponse(uri)
+
+	case MediaGetSnapshotUri:
+		token := FindTagValue(req, "ProfileToken")
+		uri := d.GetSnapshotUri(token)
+		return GetSnapshotUriResponse(uri)
+	}
+
+	return nil
+}
 
 func GetRequestAction(b []byte) string {
 	// <soap-env:Body><ns0:GetCapabilities xmlns:ns0="http://www.onvif.org/ver10/device/wsdl">
