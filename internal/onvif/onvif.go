@@ -511,12 +511,34 @@ func setupDevice(id string, conf *DeviceConfig, globalCfg *Config, idx int) {
 
 func startDeviceServer(addr string, dev *onvif.ServerDevice, devID string, streamName string) {
 	mux := http.NewServeMux()
+
 	handler := func(w http.ResponseWriter, r *http.Request) {
-		// Snapshot endpoint redirect
+		// Snapshot endpoint: rewrite to frame.jpeg and serve via API handler
 		if r.Method == "GET" && (r.URL.Path == "/snapshot.png" || r.URL.Path == "/snapshot.jpg" || r.URL.Path == "/snapshot") {
-			snapURL := fmt.Sprintf("/api/frame.jpeg?src=%s", streamName)
-			log.Debug().Str("device", devID).Str("stream", streamName).Str("redirect", snapURL).Msg("[onvif] snapshot redirect")
-			http.Redirect(w, r, snapURL, http.StatusTemporaryRedirect)
+			r.URL.Path = "/api/frame.jpeg"
+			q := r.URL.Query()
+			q.Set("src", streamName)
+			r.URL.RawQuery = q.Encode()
+			if api.Handler != nil {
+				api.Handler.ServeHTTP(w, r)
+				return
+			}
+			http.Redirect(w, r, "/api/frame.jpeg?src="+streamName, http.StatusTemporaryRedirect)
+			return
+		}
+
+		// API endpoints (e.g. /api/frame.jpeg?src=...)
+		if strings.HasPrefix(r.URL.Path, "/api") {
+			if api.Handler != nil {
+				api.Handler.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		// Friendly device status page
+		if r.Method == "GET" && (r.URL.Path == "/" || r.URL.Path == "/onvif" || r.URL.Path == "/onvif/") {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(fmt.Sprintf("<html><body><h1>go2rtc Virtual ONVIF Camera</h1><p>Device: <b>%s</b></p><p>Stream: <b>%s</b></p><p><a href=\"/onvif/device_service\">/onvif/device_service</a></p></body></html>", devID, streamName)))
 			return
 		}
 
@@ -527,32 +549,77 @@ func startDeviceServer(addr string, dev *onvif.ServerDevice, devID string, strea
 		}
 
 		op := onvif.GetRequestAction(b)
-		log.Trace().Str("device", devID).Str("stream", streamName).Str("op", op).Str("remote", r.RemoteAddr).Msgf("[onvif] device SOAP request:\n%s", b)
+		if op == "" {
+			if soapAction := r.Header.Get("SOAPAction"); soapAction != "" {
+				soapAction = strings.Trim(soapAction, `"`)
+				if idx := strings.LastIndexAny(soapAction, "/#"); idx >= 0 {
+					op = soapAction[idx+1:]
+				} else {
+					op = soapAction
+				}
+			}
+		}
+		if op == "" {
+			if ct := r.Header.Get("Content-Type"); strings.Contains(ct, "action=") {
+				parts := strings.Split(ct, "action=")
+				if len(parts) > 1 {
+					act := strings.Trim(strings.Split(parts[1], ";")[0], `"`)
+					if idx := strings.LastIndexAny(act, "/#"); idx >= 0 {
+						op = act[idx+1:]
+					} else {
+						op = act
+					}
+				}
+			}
+		}
 
-		resp := dev.HandleRequest(b, r.Host)
+		log.Debug().
+			Str("device", devID).
+			Str("stream", streamName).
+			Str("op", op).
+			Str("path", r.URL.Path).
+			Str("remote", r.RemoteAddr).
+			Msg("[onvif] device HTTP request")
+
+		resp := dev.HandleRequestWithAction(b, r.Host, op)
 		if resp == nil {
-			log.Warn().Str("device", devID).Str("op", op).Msg("[onvif] unsupported SOAP operation")
+			log.Warn().
+				Str("device", devID).
+				Str("stream", streamName).
+				Str("op", op).
+				Str("path", r.URL.Path).
+				Str("body", string(b)).
+				Msg("[onvif] unsupported SOAP operation")
 			http.Error(w, "unsupported operation", http.StatusBadRequest)
 			return
 		}
 
 		log.Trace().Str("device", devID).Str("op", op).Msgf("[onvif] device SOAP response:\n%s", resp)
-		w.Header().Set("Content-Type", "application/soap+xml; charset=utf-8")
+
+		if strings.Contains(r.Header.Get("Content-Type"), "text/xml") || strings.Contains(string(b), "schemas.xmlsoap.org/soap/envelope") {
+			w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+		} else {
+			w.Header().Set("Content-Type", "application/soap+xml; charset=utf-8")
+		}
+
 		_, _ = w.Write(resp)
 	}
 
 	mux.HandleFunc("/", handler)
+	mux.HandleFunc("/onvif", handler)
 	mux.HandleFunc("/onvif/", handler)
 	mux.HandleFunc("/onvif/device_service", handler)
 	mux.HandleFunc("/onvif/media_service", handler)
+	mux.HandleFunc("/api/", handler)
+	mux.HandleFunc("/api/frame.jpeg", handler)
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Error().Err(err).Str("addr", addr).Str("device", devID).Msg("[onvif] device HTTP server listen failed")
+		log.Error().Err(err).Str("addr", addr).Str("device", devID).Msg("[onvif] device HTTP server listen failed (check permissions for port 80 or IP binding)")
 		return
 	}
 
-	log.Info().Str("addr", addr).Str("device", devID).Str("stream", streamName).Msg("[onvif] dedicated device HTTP server listening")
+	log.Info().Str("addr", addr).Str("device", devID).Str("stream", streamName).Msg("[onvif] dedicated device HTTP server active")
 	srv := &http.Server{Handler: mux}
 	_ = srv.Serve(ln)
 }

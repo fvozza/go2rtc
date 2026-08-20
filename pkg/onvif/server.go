@@ -383,7 +383,14 @@ func (d *ServerDevice) GetScopesResponse() []byte {
 }
 
 func (d *ServerDevice) HandleRequest(req []byte, host string) []byte {
-	operation := GetRequestAction(req)
+	return d.HandleRequestWithAction(req, host, "")
+}
+
+func (d *ServerDevice) HandleRequestWithAction(req []byte, host string, action string) []byte {
+	operation := action
+	if operation == "" {
+		operation = GetRequestAction(req)
+	}
 	if operation == "" {
 		return nil
 	}
@@ -402,7 +409,19 @@ func (d *ServerDevice) HandleRequest(req []byte, host string) []byte {
 		MediaGetAudioEncoderConfigurations,
 		MediaGetAudioSources,
 		MediaGetAudioSourceConfigurations,
-		MediaGetVideoEncoderConfigurationOptions:
+		MediaGetVideoEncoderConfigurationOptions,
+		"GetVideoSourceConfigurationOptions",
+		"GetCompatibleVideoSourceConfigurations",
+		"GetCompatibleVideoEncoderConfigurations",
+		"GetGuaranteedNumberOfVideoEncoderInstances",
+		"GetAudioOutputConfigurations",
+		"GetAudioOutputs",
+		"GetMetadataConfigurations",
+		"GetMetadataConfigurationOptions",
+		"GetEventProperties",
+		"GetUsers",
+		"GetWsdlUrl",
+		"GetEndpointReference":
 		return StaticResponse(operation)
 
 	case DeviceGetSystemDateAndTime:
@@ -502,17 +521,32 @@ func (d *ServerDevice) HandleRequest(req []byte, host string) []byte {
 }
 
 func GetRequestAction(b []byte) string {
-	// <soap-env:Body><ns0:GetCapabilities xmlns:ns0="http://www.onvif.org/ver10/device/wsdl">
-	// <v:Body><GetSystemDateAndTime xmlns="http://www.onvif.org/ver10/device/wsdl" /></v:Body>
-	re := regexp.MustCompile(`Body[^<]+<([^ />]+)`)
+	// 1. Match first child tag of Body (e.g. <s:Body><tds:GetCapabilities>)
+	re := regexp.MustCompile(`(?is)<\s*(?:[a-zA-Z0-9_\-]+:)?Body[^>]*>\s*<\s*(?:[a-zA-Z0-9_\-]+:)?([a-zA-Z0-9_\-]+)`)
 	m := re.FindSubmatch(b)
-	if len(m) != 2 {
-		return ""
+	if len(m) == 2 && len(m[1]) > 0 {
+		tag := string(m[1])
+		if !strings.HasPrefix(tag, "!--") {
+			return tag
+		}
 	}
-	if i := bytes.IndexByte(m[1], ':'); i > 0 {
-		return string(m[1][i+1:])
+
+	// 2. Fallback: match known ONVIF action element anywhere in SOAP payload
+	reFallback := regexp.MustCompile(`(?is)<\s*(?:[a-zA-Z0-9_\-]+:)?(GetCapabilities|GetServiceCapabilities|GetServices|GetDeviceInformation|GetSystemDateAndTime|SetSystemDateAndTime|GetProfiles|GetProfile|GetVideoSources|GetVideoSourceConfigurations|GetVideoSourceConfiguration|GetVideoSourceConfigurationOptions|GetVideoEncoderConfigurations|GetVideoEncoderConfiguration|GetVideoEncoderConfigurationOptions|GetStreamUri|GetSnapshotUri|GetScopes|GetNetworkInterfaces|GetNetworkProtocols|GetDNS|GetHostname|GetNTP|GetDiscoveryMode|SystemReboot|GetUsers|GetWsdlUrl|GetEndpointReference|GetEventProperties|GetAudioSources|GetAudioSourceConfigurations|GetAudioEncoderConfigurations)[\s/>]`)
+	if m := reFallback.FindSubmatch(b); len(m) == 2 {
+		return string(m[1])
 	}
-	return string(m[1])
+
+	// 3. Fallback: classic regex
+	reOld := regexp.MustCompile(`Body[^<]+<([^ />]+)`)
+	if m := reOld.FindSubmatch(b); len(m) == 2 {
+		if i := bytes.IndexByte(m[1], ':'); i > 0 {
+			return string(m[1][i+1:])
+		}
+		return string(m[1])
+	}
+
+	return ""
 }
 
 func GetCapabilitiesResponse(host string) []byte {
@@ -758,4 +792,49 @@ var responses = map[string]string{
 	   </tt:H264>
    </trt:Options>
 </trt:GetVideoEncoderConfigurationOptionsResponse>`,
+
+	"GetVideoSourceConfigurationOptions": `<trt:GetVideoSourceConfigurationOptionsResponse>
+	<trt:Options>
+		<tt:BoundsRange>
+			<tt:XRange><tt:Min>0</tt:Min><tt:Max>0</tt:Max></tt:XRange>
+			<tt:YRange><tt:Min>0</tt:Min><tt:Max>0</tt:Max></tt:YRange>
+			<tt:WidthRange><tt:Min>640</tt:Min><tt:Max>3840</tt:Max></tt:WidthRange>
+			<tt:HeightRange><tt:Min>360</tt:Min><tt:Max>2160</tt:Max></tt:HeightRange>
+		</tt:BoundsRange>
+		<tt:VideoSourceTokensAvailable>vsrc_main_stream</tt:VideoSourceTokensAvailable>
+	</trt:Options>
+</trt:GetVideoSourceConfigurationOptionsResponse>`,
+
+	"GetCompatibleVideoSourceConfigurations": `<trt:GetCompatibleVideoSourceConfigurationsResponse>
+	<trt:Configurations token="main_stream">
+		<tt:Name>VSC_MainStream</tt:Name>
+		<tt:UseCount>1</tt:UseCount>
+		<tt:SourceToken>vsrc_main_stream</tt:SourceToken>
+		<tt:Bounds x="0" y="0" width="1920" height="1080"></tt:Bounds>
+	</trt:Configurations>
+</trt:GetCompatibleVideoSourceConfigurationsResponse>`,
+
+	"GetCompatibleVideoEncoderConfigurations": `<trt:GetCompatibleVideoEncoderConfigurationsResponse>
+	<trt:Configurations token="main_stream">
+		<tt:Name>VEC_MainStream</tt:Name>
+		<tt:UseCount>1</tt:UseCount>
+		<tt:Encoding>H264</tt:Encoding>
+		<tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+		<tt:Quality>4</tt:Quality>
+		<tt:RateControl><tt:FrameRateLimit>30</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>4096</tt:BitrateLimit></tt:RateControl>
+		<tt:H264><tt:GovLength>30</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>
+		<tt:Multicast><tt:Address><tt:Type>IPv4</tt:Type><tt:IPv4Address>0.0.0.0</tt:IPv4Address></tt:Address><tt:Port>0</tt:Port><tt:TTL>1</tt:TTL><tt:AutoStart>false</tt:AutoStart></tt:Multicast>
+		<tt:SessionTimeout>PT60S</tt:SessionTimeout>
+	</trt:Configurations>
+</trt:GetCompatibleVideoEncoderConfigurationsResponse>`,
+
+	"GetGuaranteedNumberOfVideoEncoderInstances": `<trt:GetGuaranteedNumberOfVideoEncoderInstancesResponse><trt:TotalNumber>2</trt:TotalNumber><trt:H264>2</trt:H264></trt:GetGuaranteedNumberOfVideoEncoderInstancesResponse>`,
+	"GetAudioOutputConfigurations":              `<trt:GetAudioOutputConfigurationsResponse />`,
+	"GetAudioOutputs":                           `<trt:GetAudioOutputsResponse />`,
+	"GetMetadataConfigurations":                 `<trt:GetMetadataConfigurationsResponse />`,
+	"GetMetadataConfigurationOptions":           `<trt:GetMetadataConfigurationOptionsResponse />`,
+	"GetEventProperties":                        `<tev:GetEventPropertiesResponse xmlns:tev="http://www.onvif.org/ver10/events/wsdl" />`,
+	"GetUsers":                                  `<tds:GetUsersResponse />`,
+	"GetWsdlUrl":                                `<tds:GetWsdlUrlResponse><tds:WsdlUrl>http://www.onvif.org/ver10/device/wsdl/devicemgmt.wsdl</tds:WsdlUrl></tds:GetWsdlUrlResponse>`,
+	"GetEndpointReference":                      `<tds:GetEndpointReferenceResponse><tds:GUID>00000000-0000-0000-0000-000000000000</tds:GUID></tds:GetEndpointReferenceResponse>`,
 }
