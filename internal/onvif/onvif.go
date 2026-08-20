@@ -29,6 +29,7 @@ type Config struct {
 		Discovery *bool                    `yaml:"discovery"` // WS-Discovery responder (default: true)
 		HTTPPort  int                      `yaml:"http_port"` // HTTP port on virtual IP (default: 80)
 		RTSPPort  int                      `yaml:"rtsp_port"` // RTSP port on virtual IP (default: 8554)
+		Streams   []string                 `yaml:"streams"`   // explicit list of stream names to publish as virtual ONVIF cameras
 		Server    struct {
 			Listen    string `yaml:"listen"`
 			Discovery *bool  `yaml:"discovery"`
@@ -47,6 +48,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 			Discovery *bool                    `yaml:"discovery"`
 			HTTPPort  int                      `yaml:"http_port"`
 			RTSPPort  int                      `yaml:"rtsp_port"`
+			Streams   []string                 `yaml:"streams"`
 			Server    struct {
 				Listen    string `yaml:"listen"`
 				Discovery *bool  `yaml:"discovery"`
@@ -56,7 +58,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 		} `yaml:"onvif"`
 	}
 	var standard rawStandard
-	if err := node.Decode(&standard); err == nil && (standard.Mod.Dev != "" || standard.Mod.Enabled != nil || len(standard.Mod.Devices) > 0 || len(standard.Mod.List) > 0 || standard.Mod.Server.Listen != "") {
+	if err := node.Decode(&standard); err == nil && (standard.Mod.Dev != "" || standard.Mod.Enabled != nil || len(standard.Mod.Streams) > 0 || len(standard.Mod.Devices) > 0 || len(standard.Mod.List) > 0 || standard.Mod.Server.Listen != "") {
 		c.Mod = standard.Mod
 		return nil
 	}
@@ -181,36 +183,52 @@ func initServers(cfg *Config) {
 
 	allDevs := make(map[string]*DeviceConfig)
 
-	// 2. Load explicitly declared devices (if any)
-	for id, dev := range cfg.Mod.Devices {
-		allDevs[id] = dev
-	}
-	for i, dev := range cfg.Mod.List {
-		id := dev.Name
-		if id == "" {
-			id = "camera_" + strconv.Itoa(i)
+	// 2. Determine which streams/devices to publish:
+	if len(cfg.Mod.Streams) > 0 {
+		// Option A: Explicit onvif.streams list specified
+		for _, streamName := range cfg.Mod.Streams {
+			if dev, exists := cfg.Mod.Devices[streamName]; exists {
+				allDevs[streamName] = dev
+			} else {
+				allDevs[streamName] = &DeviceConfig{
+					Name: streamName,
+					Dev:  cfg.Mod.Dev,
+				}
+			}
 		}
-		allDevs[id] = dev
-	}
-
-	// 3. Automatically create a virtual device for EVERY stream in streams
-	allStreams := streams.GetAllNames()
-	for _, streamName := range allStreams {
-		if _, exists := allDevs[streamName]; !exists {
+		log.Info().Int("count", len(allDevs)).Interface("selected_streams", cfg.Mod.Streams).Msg("[onvif] publishing selected streams as virtual ONVIF cameras")
+	} else if len(cfg.Mod.Devices) > 0 || len(cfg.Mod.List) > 0 {
+		// Option B: Explicit onvif.devices or onvif list specified
+		for id, dev := range cfg.Mod.Devices {
+			allDevs[id] = dev
+		}
+		for i, dev := range cfg.Mod.List {
+			id := dev.Name
+			if id == "" {
+				id = "camera_" + strconv.Itoa(i)
+			}
+			allDevs[id] = dev
+		}
+		log.Info().Int("count", len(allDevs)).Msg("[onvif] publishing configured ONVIF devices")
+	} else {
+		// Option C: Publish all streams from go2rtc streams registry
+		allStreams := streams.GetAllNames()
+		for _, streamName := range allStreams {
 			devConf := &DeviceConfig{
 				Name: streamName,
 				Dev:  cfg.Mod.Dev,
 			}
 			allDevs[streamName] = devConf
 		}
+		log.Info().Int("count", len(allDevs)).Msg("[onvif] automatically publishing all streams as virtual ONVIF cameras")
 	}
 
 	if len(allDevs) == 0 {
-		log.Info().Msg("[onvif] no streams or virtual devices found")
+		log.Info().Msg("[onvif] no streams or virtual devices to publish")
 		return
 	}
 
-	// 4. Setup each 1:1 stream virtual camera
+	// 3. Setup each 1:1 stream virtual camera
 	idx := 0
 	for id, devConf := range allDevs {
 		setupDevice(id, devConf, cfg, idx)

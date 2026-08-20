@@ -23,9 +23,9 @@ Go2rtc can act as an ONVIF Profile S server to expose streams to NVRs (like **Un
 
 It includes a built-in **WS-Discovery responder** (UDP 3702 multicast) so NVRs can automatically discover virtual cameras on the local network.
 
-### 1. Automatic 1:1 Stream-to-Virtual Camera Mode (Recommended for UniFi Protect)
+### 1. Selective Stream Publishing (Recommended for UniFi Protect)
 
-For UniFi Protect and NVRs requiring 1 IP per camera, `go2rtc` automatically creates an isolated virtual ONVIF camera (with a dedicated MacVLAN interface named `go2rtc_onvif_<index>`, unique MAC address, and DHCP IP) **for every stream** defined in `streams:`:
+You can choose exactly which streams to publish as virtual ONVIF cameras:
 
 ```yaml
 onvif:
@@ -35,22 +35,29 @@ onvif:
   http_port: 80      # HTTP port on virtual IP (default: 80)
   rtsp_port: 8554    # RTSP port on virtual IP (default: 8554)
 
+  # Choose which streams to publish as virtual ONVIF cameras:
+  streams:
+    - cam-ber-0
+    - cam-ta-1
+
 streams:
   cam-ber-0: rtsp://192.168.1.50:554/ch0
-  cam-ber-1: rtsp://192.168.1.51:554/ch0
+  cam-ber-1: rtsp://192.168.1.51:554/ch0  # not published to ONVIF
   cam-ta-1:  rtsp://192.168.1.52:554/ch0
 ```
 
-*Every stream receives:*
+*Every selected stream receives:*
 - Isolated MacVLAN interface (`go2rtc_onvif_0`, `go2rtc_onvif_1`, etc.).
 - Unique DHCP IP address (e.g. `192.168.1.181`, `192.168.1.182`).
 - Isolated ONVIF Profile S SOAP service exposing **only that single stream** as `MainStream`.
 - Snapshot endpoint (`http://<virtual_ip>:80/snapshot.png` redirecting to frame JPEG).
 - Automatic WS-Discovery advertisement.
 
+> **Note**: If the `onvif.streams` list is omitted, `go2rtc` will automatically publish **all streams** defined in `streams:`.
+
 ### 2. Optional Per-Stream Customization
 
-You can optionally override settings for individual streams:
+You can optionally override settings (e.g. static IP, MAC, custom name) for individual streams:
 
 ```yaml
 onvif:
