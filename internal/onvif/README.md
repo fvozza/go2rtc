@@ -53,7 +53,7 @@ streams:
 - Snapshot endpoint (`http://<virtual_ip>:80/snapshot.png` redirecting to frame JPEG).
 - Automatic WS-Discovery advertisement.
 
-> **Note**: If the `onvif.streams` list is omitted, `go2rtc` will automatically publish **all streams** defined in `streams:`.
+> **Note**: Virtual ONVIF cameras are only published for streams explicitly listed in `onvif.streams` or `onvif.devices`. If neither is specified, no virtual cameras will be created.
 
 ### 2. Optional Per-Stream Customization
 

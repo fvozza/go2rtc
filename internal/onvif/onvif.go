@@ -211,20 +211,8 @@ func initServers(cfg *Config) {
 		}
 		log.Info().Int("count", len(allDevs)).Msg("[onvif] publishing configured ONVIF devices")
 	} else {
-		// Option C: Publish all streams from go2rtc streams registry
-		allStreams := streams.GetAllNames()
-		for _, streamName := range allStreams {
-			devConf := &DeviceConfig{
-				Name: streamName,
-				Dev:  cfg.Mod.Dev,
-			}
-			allDevs[streamName] = devConf
-		}
-		log.Info().Int("count", len(allDevs)).Msg("[onvif] automatically publishing all streams as virtual ONVIF cameras")
-	}
-
-	if len(allDevs) == 0 {
-		log.Info().Msg("[onvif] no streams or virtual devices to publish")
+		// Neither onvif.streams nor onvif.devices provided: publish nothing
+		log.Info().Msg("[onvif] no streams or devices specified in onvif config; no virtual ONVIF cameras published")
 		return
 	}
 
