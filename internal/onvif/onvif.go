@@ -172,6 +172,11 @@ func initServers(cfg *Config) {
 		return
 	}
 
+	// 2. Clean up any existing virtual MacVLAN interfaces at startup
+	if cleaned := onvif.CleanupMacVLANInterfaces(); len(cleaned) > 0 {
+		log.Info().Strs("interfaces", cleaned).Msg("[onvif] cleaned up existing virtual MacVLAN interfaces at startup")
+	}
+
 	discoveryServer = onvif.NewDiscoveryServer()
 	discoveryServer.OnProbe = func(remoteAddr, probeUUID string, matchedDevices int) {
 		log.Debug().

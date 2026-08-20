@@ -4,6 +4,7 @@ package onvif
 
 import (
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 )
@@ -15,6 +16,29 @@ type SetupMacVLANResult struct {
 	DHCPClient string `json:"dhcp_client"`
 	DHCPOutput string `json:"dhcp_output"`
 	StaticIP   string `json:"static_ip,omitempty"`
+}
+
+// CleanupMacVLANInterfaces removes all virtual network interfaces matching prefixes (e.g. go2rtc_onvif_, rtsp2onvif_, go2rc_onvif_).
+func CleanupMacVLANInterfaces(prefixes ...string) []string {
+	if len(prefixes) == 0 {
+		prefixes = []string{"go2rtc_onvif_", "rtsp2onvif_", "go2rc_onvif_"}
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+
+	var removed []string
+	for _, iface := range ifaces {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(iface.Name, prefix) {
+				_ = exec.Command("ip", "link", "del", "dev", iface.Name).Run()
+				removed = append(removed, iface.Name)
+				break
+			}
+		}
+	}
+	return removed
 }
 
 // SetupMacVLAN creates a macvlan interface on Linux, configures its MAC and IP (via static or DHCP).

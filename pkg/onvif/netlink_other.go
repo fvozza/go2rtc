@@ -13,6 +13,11 @@ type SetupMacVLANResult struct {
 	StaticIP   string `json:"static_ip,omitempty"`
 }
 
+// CleanupMacVLANInterfaces is a stub on non-Linux platforms.
+func CleanupMacVLANInterfaces(prefixes ...string) []string {
+	return nil
+}
+
 // SetupMacVLAN is a stub on non-Linux platforms where MacVLAN is unsupported.
 func SetupMacVLAN(parentDev, vlanName, macAddress, staticIP string) (*SetupMacVLANResult, error) {
 	return nil, errors.New("macvlan is only supported on Linux")
