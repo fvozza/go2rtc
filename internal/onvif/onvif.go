@@ -24,20 +24,30 @@ import (
 
 type Config struct {
 	Mod struct {
-		Server struct {
+		Enabled   *bool                    `yaml:"enabled"`   // master enable/disable toggle (default: true)
+		Dev       string                   `yaml:"dev"`       // parent interface for auto MacVLAN + DHCP (e.g. eth0)
+		Discovery *bool                    `yaml:"discovery"` // WS-Discovery responder (default: true)
+		HTTPPort  int                      `yaml:"http_port"` // HTTP port on virtual IP (default: 80)
+		RTSPPort  int                      `yaml:"rtsp_port"` // RTSP port on virtual IP (default: 8554)
+		Server    struct {
 			Listen    string `yaml:"listen"`
 			Discovery *bool  `yaml:"discovery"`
 		} `yaml:"server"`
-		Devices map[string]*DeviceConfig `yaml:"devices"`
-		List    []*DeviceConfig          `yaml:"onvif"`
+		Devices map[string]*DeviceConfig `yaml:"devices"` // optional per-stream overrides
+		List    []*DeviceConfig          `yaml:"onvif"`   // list compatibility
 	} `yaml:"onvif"`
 }
 
 func (c *Config) UnmarshalYAML(node *yaml.Node) error {
-	// 1. Try decoding standard structured onvif config: { onvif: { server: ..., devices: ... } }
+	// 1. Standard structured onvif config
 	type rawStandard struct {
 		Mod struct {
-			Server struct {
+			Enabled   *bool                    `yaml:"enabled"`
+			Dev       string                   `yaml:"dev"`
+			Discovery *bool                    `yaml:"discovery"`
+			HTTPPort  int                      `yaml:"http_port"`
+			RTSPPort  int                      `yaml:"rtsp_port"`
+			Server    struct {
 				Listen    string `yaml:"listen"`
 				Discovery *bool  `yaml:"discovery"`
 			} `yaml:"server"`
@@ -46,12 +56,12 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 		} `yaml:"onvif"`
 	}
 	var standard rawStandard
-	if err := node.Decode(&standard); err == nil && (len(standard.Mod.Devices) > 0 || len(standard.Mod.List) > 0 || standard.Mod.Server.Listen != "") {
+	if err := node.Decode(&standard); err == nil && (standard.Mod.Dev != "" || standard.Mod.Enabled != nil || len(standard.Mod.Devices) > 0 || len(standard.Mod.List) > 0 || standard.Mod.Server.Listen != "") {
 		c.Mod = standard.Mod
 		return nil
 	}
 
-	// 2. Try decoding onvif as a list of devices (rtsp-to-onvif style: onvif: [ {name: ...}, ... ])
+	// 2. List wrapper style (onvif: [ {name: ...}, ... ])
 	var listWrapper struct {
 		Onvif []*DeviceConfig `yaml:"onvif"`
 	}
@@ -60,7 +70,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 		return nil
 	}
 
-	// 3. Try decoding onvif as direct map of devices (homekit style: onvif: { camera1: {...}, camera2: {...} })
+	// 3. Direct map style (onvif: { cam1: {...}, cam2: {...} })
 	var mapWrapper struct {
 		Onvif map[string]*DeviceConfig `yaml:"onvif"`
 	}
@@ -85,8 +95,9 @@ type DeviceConfig struct {
 	IPv4            string                  `yaml:"ipv4"`      // Static IPv4 address (e.g. 192.168.1.187/24)
 	UUID            string                  `yaml:"uuid"`      // Unique ONVIF UUID
 	Listen          string                  `yaml:"listen"`    // IP:Port or Port for dedicated device server
-	RTSPPort        int                     `yaml:"rtsp_port"` // Custom RTSP port (defaults to rtsp.Port)
-	HTTPPort        int                     `yaml:"http_port"` // Custom HTTP port (defaults to api.Port)
+	RTSPPort        int                     `yaml:"rtsp_port"` // Custom RTSP port (defaults to rtsp_port or 8554)
+	HTTPPort        int                     `yaml:"http_port"` // Custom HTTP port (defaults to http_port or 80)
+	Stream          string                  `yaml:"stream"`    // Explicit stream name
 	Manufacturer    string                  `yaml:"manufacturer"`
 	Model           string                  `yaml:"model"`
 	FirmwareVersion string                  `yaml:"firmware_version"`
@@ -149,9 +160,16 @@ var (
 	devicesMu       sync.RWMutex
 	devices         = make(map[string]*onvif.ServerDevice)
 	hosts           = make(map[string]*onvif.ServerDevice)
+	deviceStreams   = make(map[string]string) // hostOrIP/deviceID -> streamName
 )
 
 func initServers(cfg *Config) {
+	// 1. Check if explicitly disabled
+	if cfg.Mod.Enabled != nil && !*cfg.Mod.Enabled {
+		log.Info().Msg("[onvif] virtual ONVIF devices disabled in config (enabled: false)")
+		return
+	}
+
 	discoveryServer = onvif.NewDiscoveryServer()
 	discoveryServer.OnProbe = func(remoteAddr, probeUUID string, matchedDevices int) {
 		log.Debug().
@@ -162,6 +180,8 @@ func initServers(cfg *Config) {
 	}
 
 	allDevs := make(map[string]*DeviceConfig)
+
+	// 2. Load explicitly declared devices (if any)
 	for id, dev := range cfg.Mod.Devices {
 		allDevs[id] = dev
 	}
@@ -173,28 +193,35 @@ func initServers(cfg *Config) {
 		allDevs[id] = dev
 	}
 
-	for id, devConf := range allDevs {
-		setupDevice(id, devConf)
-	}
-
-	discoveryEnabled := true
-	if cfg.Mod.Server.Discovery != nil {
-		discoveryEnabled = *cfg.Mod.Server.Discovery
+	// 3. Automatically create a virtual device for EVERY stream in streams
+	allStreams := streams.GetAllNames()
+	for _, streamName := range allStreams {
+		if _, exists := allDevs[streamName]; !exists {
+			devConf := &DeviceConfig{
+				Name: streamName,
+				Dev:  cfg.Mod.Dev,
+			}
+			allDevs[streamName] = devConf
+		}
 	}
 
 	if len(allDevs) == 0 {
-		// Register default go2rtc device in discovery
-		apiPort := api.Port
-		if apiPort == 0 {
-			apiPort = 1984
-		}
-		discoveryServer.AddDevice(&onvif.DiscoveryDeviceConfig{
-			UUID:     onvif.UUID(),
-			Name:     "go2rtc",
-			Hardware: "go2rtc",
-			XAddr:    fmt.Sprintf("http://127.0.0.1:%d/onvif/device_service", apiPort),
-		})
-		log.Info().Msg("[onvif] No devices configured, registered default go2rtc device in discovery")
+		log.Info().Msg("[onvif] no streams or virtual devices found")
+		return
+	}
+
+	// 4. Setup each 1:1 stream virtual camera
+	idx := 0
+	for id, devConf := range allDevs {
+		setupDevice(id, devConf, cfg, idx)
+		idx++
+	}
+
+	discoveryEnabled := true
+	if cfg.Mod.Discovery != nil {
+		discoveryEnabled = *cfg.Mod.Discovery
+	} else if cfg.Mod.Server.Discovery != nil {
+		discoveryEnabled = *cfg.Mod.Server.Discovery
 	}
 
 	if discoveryEnabled {
@@ -208,25 +235,42 @@ func initServers(cfg *Config) {
 	}
 }
 
-func setupDevice(id string, conf *DeviceConfig) {
-	log.Info().Str("device", id).Msg("[onvif] configuring device...")
+func setupDevice(id string, conf *DeviceConfig, globalCfg *Config, idx int) {
+	streamName := id
+	if conf.Stream != "" {
+		streamName = conf.Stream
+	}
 	if conf.Name == "" {
 		conf.Name = id
 	}
+	if conf.Dev == "" && globalCfg.Mod.Dev != "" {
+		conf.Dev = globalCfg.Mod.Dev
+	}
+
+	log.Info().Str("device", id).Str("stream", streamName).Msg("[onvif] initializing 1:1 virtual ONVIF device...")
+
 	if conf.UUID == "" {
 		conf.UUID = onvif.UUID()
-		log.Debug().Str("device", id).Str("uuid", conf.UUID).Msg("[onvif] generated UUID")
 		_ = app.PatchConfig([]string{"onvif", "devices", id, "uuid"}, conf.UUID)
 	}
 
+	// 1. MacVLAN Provisioning (starts with go2rtc_onvif_ and <= 15 chars)
 	if conf.Dev != "" {
 		if conf.MAC == "" {
 			conf.MAC = onvif.GenerateNetworkMAC()
 			log.Info().Str("device", id).Str("mac", conf.MAC).Msg("[onvif] generated LAA MAC address")
 			_ = app.PatchConfig([]string{"onvif", "devices", id, "mac"}, conf.MAC)
 		}
+
 		cleanID := strings.ReplaceAll(strings.ReplaceAll(id, " ", "_"), "/", "_")
-		vlanName := "rtsp2onvif_" + cleanID
+		candidate := "go2rtc_onvif_" + cleanID
+		var vlanName string
+		if len(candidate) <= 15 {
+			vlanName = candidate
+		} else {
+			vlanName = fmt.Sprintf("go2rtc_onvif_%d", idx)
+		}
+
 		log.Info().
 			Str("device", id).
 			Str("parent_dev", conf.Dev).
@@ -240,6 +284,7 @@ func setupDevice(id string, conf *DeviceConfig) {
 			log.Error().Err(err).
 				Str("device", id).
 				Str("dev", conf.Dev).
+				Str("vlan", vlanName).
 				Str("mac", conf.MAC).
 				Msg("[onvif] MacVLAN setup error")
 		} else {
@@ -253,6 +298,7 @@ func setupDevice(id string, conf *DeviceConfig) {
 		}
 	}
 
+	// 2. Resolve Virtual IP Address
 	ip := ""
 	if conf.IPv4 != "" {
 		ip = strings.Split(conf.IPv4, "/")[0]
@@ -263,9 +309,9 @@ func setupDevice(id string, conf *DeviceConfig) {
 		ip, err = onvif.WaitForIPv4FromMAC(conf.MAC, 10*time.Second)
 		if err != nil || ip == "" {
 			log.Warn().Str("device", id).Str("mac", conf.MAC).
-				Msg("[onvif] DHCP lease not acquired within timeout. Interface summary:")
+				Msg("[onvif] DHCP lease not acquired within timeout. Available interfaces:")
 			for _, ifInfo := range onvif.ListAllNetworkInterfaces() {
-				log.Debug().Str("device", id).Msgf("[onvif] interface: %s", ifInfo)
+				log.Debug().Str("device", id).Msgf("[onvif] %s", ifInfo)
 			}
 		} else {
 			log.Info().Str("device", id).Str("mac", conf.MAC).Str("ip", ip).Msg("[onvif] acquired IP address from DHCP")
@@ -274,198 +320,155 @@ func setupDevice(id string, conf *DeviceConfig) {
 
 	if ip == "" && conf.Target != nil && conf.Target.Hostname != "" {
 		ip = conf.Target.Hostname
-		log.Debug().Str("device", id).Str("ip", ip).Msg("[onvif] using target hostname")
 	}
 	if ip == "" && conf.Listen != "" {
 		host, _, err := net.SplitHostPort(conf.Listen)
 		if err == nil && host != "" {
 			ip = host
-			log.Debug().Str("device", id).Str("ip", ip).Msg("[onvif] using listen host")
 		}
 	}
 	if ip == "" && conf.Dev != "" {
 		ip = onvif.GetInterfaceIPv4(conf.Dev)
-		if ip != "" {
-			log.Debug().Str("device", id).Str("ip", ip).Msg("[onvif] using parent interface IP")
-		}
 	}
 	if ip == "" {
 		ip = "127.0.0.1"
-		log.Warn().Str("device", id).Msg("[onvif] no IP found, defaulting to 127.0.0.1")
 	}
 
-	serverPort := 0
-	if conf.Ports != nil && conf.Ports.Server != 0 {
-		serverPort = conf.Ports.Server
-	} else if conf.HTTPPort != 0 {
+	// 3. HTTP and RTSP Ports
+	serverPort := 80
+	if conf.HTTPPort != 0 {
 		serverPort = conf.HTTPPort
-	} else if conf.Listen != "" {
-		_, p, err := net.SplitHostPort(conf.Listen)
-		if err == nil {
-			serverPort, _ = strconv.Atoi(p)
-		} else {
-			serverPort, _ = strconv.Atoi(conf.Listen)
-		}
-	}
-	if serverPort == 0 {
+	} else if globalCfg.Mod.HTTPPort != 0 {
+		serverPort = globalCfg.Mod.HTTPPort
+	} else if conf.Ports != nil && conf.Ports.Server != 0 {
+		serverPort = conf.Ports.Server
+	} else if ip == "127.0.0.1" {
 		serverPort = api.Port
 		if serverPort == 0 {
 			serverPort = 1984
 		}
 	}
 
-	rtspPort := rtsp.Port
-	if conf.Ports != nil && conf.Ports.RTSP != 0 {
-		rtspPort = strconv.Itoa(conf.Ports.RTSP)
-	} else if conf.RTSPPort != 0 {
-		rtspPort = strconv.Itoa(conf.RTSPPort)
-	}
-	if rtspPort == "" {
-		rtspPort = "8554"
-	}
-
-	snapPort := strconv.Itoa(serverPort)
-	if conf.Ports != nil && conf.Ports.Snapshot != 0 {
-		snapPort = strconv.Itoa(conf.Ports.Snapshot)
+	rtspPort := 8554
+	if conf.RTSPPort != 0 {
+		rtspPort = conf.RTSPPort
+	} else if globalCfg.Mod.RTSPPort != 0 {
+		rtspPort = globalCfg.Mod.RTSPPort
+	} else if conf.Ports != nil && conf.Ports.RTSP != 0 {
+		rtspPort = conf.Ports.RTSP
+	} else if rtsp.Port != "" {
+		if p, err := strconv.Atoi(rtsp.Port); err == nil && p != 0 {
+			rtspPort = p
+		}
 	}
 
-	targetHost := ""
-	targetRTSPPort := 554
-	if conf.Target != nil {
-		targetHost = conf.Target.Hostname
+	// 4. Auto-register target source into streams if target was specified
+	if conf.Target != nil && conf.Target.Hostname != "" {
+		targetPort := 554
 		if conf.Target.Ports.RTSP != 0 {
-			targetRTSPPort = conf.Target.Ports.RTSP
+			targetPort = conf.Target.Ports.RTSP
 		}
+		targetPath := ""
+		if conf.HighQuality != nil && conf.HighQuality.RTSP != "" {
+			targetPath = conf.HighQuality.RTSP
+		}
+		targetURL := fmt.Sprintf("rtsp://%s:%d%s", conf.Target.Hostname, targetPort, targetPath)
+		_, _ = streams.Patch(streamName, targetURL)
 	}
 
-	// Auto-register stream sources and aliases into go2rtc streams registry
+	// 5. Strict 1:1 Media Profile Definition
+	streamURI := fmt.Sprintf("rtsp://%s:%d/%s", ip, rtspPort, streamName)
+	snapshotURI := fmt.Sprintf("http://%s:%d/api/frame.jpeg?src=%s", ip, serverPort, streamName)
+
+	mainProfile := &onvif.MediaProfile{
+		Token:       "main_stream",
+		Name:        "MainStream",
+		Width:       1920,
+		Height:      1080,
+		Framerate:   30,
+		Bitrate:     4096,
+		Quality:     4,
+		GovLength:   30,
+		H264Profile: "Main",
+		Encoding:    "H264",
+		StreamURI:   streamURI,
+		SnapshotURI: snapshotURI,
+	}
+
 	if conf.HighQuality != nil {
-		var src string
-		if conf.HighQuality.Stream != "" {
-			src = conf.HighQuality.Stream
-		} else if conf.HighQuality.RTSP != "" {
-			if strings.HasPrefix(conf.HighQuality.RTSP, "rtsp://") {
-				src = conf.HighQuality.RTSP
-			} else if targetHost != "" {
-				src = fmt.Sprintf("rtsp://%s:%d%s", targetHost, targetRTSPPort, conf.HighQuality.RTSP)
-			}
+		if conf.HighQuality.Width > 0 {
+			mainProfile.Width = conf.HighQuality.Width
 		}
-		if src != "" {
-			_, _ = streams.Patch(id, src)
-			_, _ = streams.Patch(id+"_main", src)
-			_, _ = streams.Patch("main_stream", src)
-			if conf.HighQuality.RTSP != "" {
-				clean := strings.Trim(conf.HighQuality.RTSP, "/")
-				_, _ = streams.Patch(clean, src)
-				_, _ = streams.Patch(clean+"/", src)
-			}
-			log.Info().Str("device", id).Str("source", src).Msg("[onvif] registered highQuality RTSP stream")
+		if conf.HighQuality.Height > 0 {
+			mainProfile.Height = conf.HighQuality.Height
 		}
-	}
-
-	if conf.LowQuality != nil {
-		var src string
-		if conf.LowQuality.Stream != "" {
-			src = conf.LowQuality.Stream
-		} else if conf.LowQuality.RTSP != "" {
-			if strings.HasPrefix(conf.LowQuality.RTSP, "rtsp://") {
-				src = conf.LowQuality.RTSP
-			} else if targetHost != "" {
-				src = fmt.Sprintf("rtsp://%s:%d%s", targetHost, targetRTSPPort, conf.LowQuality.RTSP)
-			}
+		if conf.HighQuality.Framerate > 0 {
+			mainProfile.Framerate = conf.HighQuality.Framerate
 		}
-		if src != "" {
-			_, _ = streams.Patch(id+"_sub", src)
-			_, _ = streams.Patch("sub_stream", src)
-			if conf.LowQuality.RTSP != "" {
-				clean := strings.Trim(conf.LowQuality.RTSP, "/")
-				_, _ = streams.Patch(clean, src)
-				_, _ = streams.Patch(clean+"/", src)
-			}
-			log.Info().Str("device", id).Str("source", src).Msg("[onvif] registered lowQuality RTSP stream")
+		if conf.HighQuality.Bitrate > 0 {
+			mainProfile.Bitrate = conf.HighQuality.Bitrate
 		}
-	}
-
-	for pToken, pConf := range conf.Profiles {
-		var src string
-		if pConf.Stream != "" {
-			src = pConf.Stream
-		} else if pConf.RTSP != "" {
-			if strings.HasPrefix(pConf.RTSP, "rtsp://") {
-				src = pConf.RTSP
-			} else if targetHost != "" {
-				src = fmt.Sprintf("rtsp://%s:%d%s", targetHost, targetRTSPPort, pConf.RTSP)
-			}
-		}
-		if src != "" {
-			_, _ = streams.Patch(pToken, src)
-			_, _ = streams.Patch(id+"_"+pToken, src)
-			if pConf.RTSP != "" {
-				clean := strings.Trim(pConf.RTSP, "/")
-				_, _ = streams.Patch(clean, src)
-				_, _ = streams.Patch(clean+"/", src)
-			}
-			log.Info().Str("device", id).Str("profile", pToken).Str("source", src).Msg("[onvif] registered profile RTSP stream")
-		}
-	}
-
-	// If the device ID is already a registered stream in streams, alias default profiles to it
-	if streams.Get(id) != nil {
-		_, _ = streams.Patch("main_stream", id)
-		_, _ = streams.Patch(id+"_main", id)
-		_, _ = streams.Patch("sub_stream", id)
 	}
 
 	var profiles []*onvif.MediaProfile
+	profiles = append(profiles, mainProfile)
 
-	if conf.HighQuality != nil {
-		p := buildProfile("main_stream", "MainStream", id, conf.HighQuality, ip, rtspPort, snapPort, conf.Target != nil)
-		profiles = append(profiles, p)
-	}
 	if conf.LowQuality != nil {
-		p := buildProfile("sub_stream", "SubStream", id, conf.LowQuality, ip, rtspPort, snapPort, conf.Target != nil)
-		profiles = append(profiles, p)
-	}
-	for pToken, pConf := range conf.Profiles {
-		pName := pToken
-		p := buildProfile(pToken, pName, id, pConf, ip, rtspPort, snapPort, conf.Target != nil)
-		profiles = append(profiles, p)
-	}
-
-	if len(profiles) == 0 {
-		defaultProfile := &onvif.MediaProfile{
-			Token:       "main_stream",
-			Name:        "MainStream",
-			Width:       1920,
-			Height:      1080,
-			Framerate:   30,
-			Bitrate:     4096,
+		subStreamURI := fmt.Sprintf("rtsp://%s:%d/%s", ip, rtspPort, streamName)
+		subSnapshotURI := fmt.Sprintf("http://%s:%d/api/frame.jpeg?src=%s", ip, serverPort, streamName)
+		subProfile := &onvif.MediaProfile{
+			Token:       "sub_stream",
+			Name:        "SubStream",
+			Width:       conf.LowQuality.Width,
+			Height:      conf.LowQuality.Height,
+			Framerate:   conf.LowQuality.Framerate,
+			Bitrate:     conf.LowQuality.Bitrate,
 			Quality:     4,
 			GovLength:   30,
 			H264Profile: "Main",
 			Encoding:    "H264",
-			StreamURI:   fmt.Sprintf("rtsp://%s:%s/%s", ip, rtspPort, id),
-			SnapshotURI: fmt.Sprintf("http://%s:%s/api/frame.jpeg?src=%s", ip, snapPort, id),
+			StreamURI:   subStreamURI,
+			SnapshotURI: subSnapshotURI,
 		}
-		profiles = append(profiles, defaultProfile)
+		if subProfile.Width <= 0 {
+			subProfile.Width = 640
+		}
+		if subProfile.Height <= 0 {
+			subProfile.Height = 360
+		}
+		if subProfile.Framerate <= 0 {
+			subProfile.Framerate = 15
+		}
+		if subProfile.Bitrate <= 0 {
+			subProfile.Bitrate = 1024
+		}
+		profiles = append(profiles, subProfile)
 	}
 
 	srvDev := &onvif.ServerDevice{
 		Name:            conf.Name,
-		Manufacturer:    conf.Manufacturer,
-		Model:           conf.Model,
-		FirmwareVersion: conf.FirmwareVersion,
+		Manufacturer:    "go2rtc",
+		Model:           "VirtualCamera",
+		FirmwareVersion: app.Version,
 		SerialNumber:    conf.SerialNumber,
 		HardwareID:      conf.HardwareID,
 		Profiles:        profiles,
 	}
 
+	// 6. Map device and routing
 	devicesMu.Lock()
 	devices[id] = srvDev
-	hosts[ip] = srvDev
-	hosts[net.JoinHostPort(ip, strconv.Itoa(serverPort))] = srvDev
+	if ip != "" && ip != "127.0.0.1" {
+		hosts[ip] = srvDev
+		hosts[net.JoinHostPort(ip, strconv.Itoa(serverPort))] = srvDev
+		deviceStreams[ip] = streamName
+		deviceStreams[net.JoinHostPort(ip, strconv.Itoa(serverPort))] = streamName
+		deviceStreams[net.JoinHostPort(ip, strconv.Itoa(rtspPort))] = streamName
+	}
+	deviceStreams[id] = streamName
 	devicesMu.Unlock()
 
+	// 7. Register in WS-Discovery Responder
 	xaddr := fmt.Sprintf("http://%s:%d/onvif/device_service", ip, serverPort)
 	discoveryServer.AddDevice(&onvif.DiscoveryDeviceConfig{
 		UUID:     conf.UUID,
@@ -476,163 +479,40 @@ func setupDevice(id string, conf *DeviceConfig) {
 
 	log.Info().
 		Str("device", id).
-		Str("name", conf.Name).
+		Str("stream", streamName).
 		Str("ip", ip).
 		Int("http_port", serverPort).
-		Str("rtsp_port", rtspPort).
+		Int("rtsp_port", rtspPort).
 		Str("xaddr", xaddr).
-		Int("profiles", len(profiles)).
-		Msg("[onvif] virtual camera device ready")
+		Msg("[onvif] 1:1 virtual ONVIF camera ready")
 
-	if conf.Listen != "" || (conf.Ports != nil && conf.Ports.Server != 0) {
-		listenAddr := conf.Listen
-		if listenAddr == "" && conf.Ports != nil && conf.Ports.Server != 0 {
-			listenAddr = net.JoinHostPort(ip, strconv.Itoa(conf.Ports.Server))
-		}
-		go startDeviceServer(listenAddr, srvDev, id)
-	}
-
-	// Dedicated RTSP listener on virtual IP if custom port or IP specified
-	if rtspPort != "" && (rtspPort != rtsp.Port || (conf.Ports != nil && conf.Ports.RTSP != 0) || conf.RTSPPort != 0) {
-		if ip != "" && ip != "127.0.0.1" {
-			rtspAddr := net.JoinHostPort(ip, rtspPort)
-			if _, err := rtsp.Listen(rtspAddr); err != nil {
-				log.Debug().Err(err).Str("addr", rtspAddr).Str("device", id).Msg("[onvif] dedicated RTSP listener (shares global port or already bound)")
-			} else {
-				log.Info().Str("addr", rtspAddr).Str("device", id).Msg("[onvif] dedicated RTSP listener active on virtual interface")
-			}
-		}
-	}
-}
-
-func buildProfile(token, name, devID string, conf *ProfileConf, ip, rtspPort, snapPort string, hasTarget bool) *onvif.MediaProfile {
-	p := &onvif.MediaProfile{
-		Token:       token,
-		Name:        name,
-		Width:       conf.Width,
-		Height:      conf.Height,
-		Framerate:   conf.Framerate,
-		Bitrate:     conf.Bitrate,
-		Quality:     conf.Quality,
-		GovLength:   conf.GovLength,
-		H264Profile: conf.H264Profile,
-		Encoding:    conf.Encoding,
-	}
-	if p.Width <= 0 {
-		p.Width = 1920
-	}
-	if p.Height <= 0 {
-		p.Height = 1080
-	}
-	if p.Framerate <= 0 {
-		p.Framerate = 30
-	}
-	if p.Bitrate <= 0 {
-		p.Bitrate = 4096
-	}
-	if p.GovLength <= 0 {
-		p.GovLength = p.Framerate
-	}
-	if p.H264Profile == "" {
-		p.H264Profile = "Main"
-	}
-	if p.Encoding == "" {
-		p.Encoding = "H264"
+	// 8. Start dedicated HTTP server on Virtual IP (for SOAP & Snapshot redirect)
+	if ip != "" && ip != "127.0.0.1" {
+		httpAddr := net.JoinHostPort(ip, strconv.Itoa(serverPort))
+		go startDeviceServer(httpAddr, srvDev, id, streamName)
+	} else if conf.Listen != "" {
+		go startDeviceServer(conf.Listen, srvDev, id, streamName)
 	}
 
-	streamName := conf.Stream
-	if streamName == "" {
-		if conf.RTSP != "" && !strings.HasPrefix(conf.RTSP, "rtsp://") {
-			streamName = strings.TrimPrefix(conf.RTSP, "/")
+	// 9. Start dedicated RTSP server on Virtual IP
+	if ip != "" && ip != "127.0.0.1" {
+		rtspAddr := net.JoinHostPort(ip, strconv.Itoa(rtspPort))
+		if _, err := rtsp.Listen(rtspAddr); err != nil {
+			log.Debug().Err(err).Str("addr", rtspAddr).Str("stream", streamName).Msg("[onvif] dedicated RTSP listener (shares global port or bound)")
 		} else {
-			streamName = devID
+			log.Info().Str("addr", rtspAddr).Str("stream", streamName).Msg("[onvif] dedicated RTSP server active on virtual interface")
 		}
 	}
-
-	if conf.RTSP != "" && strings.HasPrefix(conf.RTSP, "rtsp://") {
-		p.StreamURI = conf.RTSP
-	} else {
-		p.StreamURI = fmt.Sprintf("rtsp://%s:%s/%s", ip, rtspPort, streamName)
-	}
-
-	if conf.Snapshot != "" && strings.HasPrefix(conf.Snapshot, "http://") {
-		p.SnapshotURI = conf.Snapshot
-	} else if conf.Snapshot != "" && hasTarget {
-		p.SnapshotURI = fmt.Sprintf("http://%s:%s%s", ip, snapPort, conf.Snapshot)
-	} else {
-		p.SnapshotURI = fmt.Sprintf("http://%s:%s/api/frame.jpeg?src=%s", ip, snapPort, streamName)
-	}
-
-	return p
 }
 
-func resolveONVIFStream(path string, hostOrIP string) *streams.Stream {
-	devicesMu.RLock()
-	defer devicesMu.RUnlock()
-
-	cleanPath := strings.Trim(path, "/")
-
-	// 1. Direct match by device ID
-	if dev, ok := devices[cleanPath]; ok && len(dev.Profiles) > 0 {
-		return getStreamForProfile(dev.Profiles[0], cleanPath)
-	}
-
-	// 2. Match by destination Host / IP (virtual camera IP)
-	if hostOrIP != "" && hostOrIP != "127.0.0.1" && hostOrIP != "0.0.0.0" {
-		if dev, ok := hosts[hostOrIP]; ok {
-			for _, p := range dev.Profiles {
-				if strings.EqualFold(p.Token, cleanPath) || strings.EqualFold(p.Name, cleanPath) {
-					return getStreamForProfile(p, cleanPath)
-				}
-			}
-			if len(dev.Profiles) > 0 {
-				return getStreamForProfile(dev.Profiles[0], cleanPath)
-			}
-		}
-	}
-
-	// 3. Match any profile across all devices
-	for devID, dev := range devices {
-		for _, p := range dev.Profiles {
-			if strings.EqualFold(p.Token, cleanPath) || strings.EqualFold(p.Name, cleanPath) {
-				return getStreamForProfile(p, devID)
-			}
-		}
-	}
-
-	return nil
-}
-
-func getStreamForProfile(p *onvif.MediaProfile, fallbackName string) *streams.Stream {
-	if p == nil {
-		return nil
-	}
-	if s := streams.Get(p.Token); s != nil {
-		return s
-	}
-	if p.StreamURI != "" {
-		if u, err := url.Parse(p.StreamURI); err == nil {
-			clean := strings.Trim(u.Path, "/")
-			if s := streams.Get(clean); s != nil {
-				return s
-			}
-		}
-	}
-	if fallbackName != "" {
-		if s := streams.Get(fallbackName); s != nil {
-			return s
-		}
-	}
-	return nil
-}
-
-func startDeviceServer(addr string, dev *onvif.ServerDevice, devID string) {
+func startDeviceServer(addr string, dev *onvif.ServerDevice, devID string, streamName string) {
 	mux := http.NewServeMux()
 	handler := func(w http.ResponseWriter, r *http.Request) {
+		// Snapshot endpoint redirect
 		if r.Method == "GET" && (r.URL.Path == "/snapshot.png" || r.URL.Path == "/snapshot.jpg" || r.URL.Path == "/snapshot") {
-			snapURI := dev.GetSnapshotUri("main_stream")
-			log.Debug().Str("device", devID).Str("redirect", snapURI).Msg("[onvif] snapshot redirect")
-			http.Redirect(w, r, snapURI, http.StatusTemporaryRedirect)
+			snapURL := fmt.Sprintf("/api/frame.jpeg?src=%s", streamName)
+			log.Debug().Str("device", devID).Str("stream", streamName).Str("redirect", snapURL).Msg("[onvif] snapshot redirect")
+			http.Redirect(w, r, snapURL, http.StatusTemporaryRedirect)
 			return
 		}
 
@@ -643,7 +523,7 @@ func startDeviceServer(addr string, dev *onvif.ServerDevice, devID string) {
 		}
 
 		op := onvif.GetRequestAction(b)
-		log.Trace().Str("device", devID).Str("op", op).Str("remote", r.RemoteAddr).Msgf("[onvif] device SOAP request:\n%s", b)
+		log.Trace().Str("device", devID).Str("stream", streamName).Str("op", op).Str("remote", r.RemoteAddr).Msgf("[onvif] device SOAP request:\n%s", b)
 
 		resp := dev.HandleRequest(b, r.Host)
 		if resp == nil {
@@ -664,13 +544,59 @@ func startDeviceServer(addr string, dev *onvif.ServerDevice, devID string) {
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Error().Err(err).Str("addr", addr).Str("device", devID).Msg("[onvif] device server listen failed")
+		log.Error().Err(err).Str("addr", addr).Str("device", devID).Msg("[onvif] device HTTP server listen failed")
 		return
 	}
 
-	log.Info().Str("addr", addr).Str("device", devID).Msg("[onvif] dedicated device HTTP server listening")
+	log.Info().Str("addr", addr).Str("device", devID).Str("stream", streamName).Msg("[onvif] dedicated device HTTP server listening")
 	srv := &http.Server{Handler: mux}
 	_ = srv.Serve(ln)
+}
+
+func resolveONVIFStream(path string, hostOrIP string) *streams.Stream {
+	devicesMu.RLock()
+	defer devicesMu.RUnlock()
+
+	cleanPath := strings.Trim(path, "/")
+
+	// 1. Direct match by destination Host or Virtual IP
+	if hostOrIP != "" {
+		if streamName, ok := deviceStreams[hostOrIP]; ok {
+			if s := streams.Get(streamName); s != nil {
+				return s
+			}
+		}
+		if dev, ok := hosts[hostOrIP]; ok && len(dev.Profiles) > 0 {
+			if s := streams.Get(cleanPath); s != nil {
+				return s
+			}
+			if s := streams.Get(dev.Profiles[0].Token); s != nil {
+				return s
+			}
+			if u, err := url.Parse(dev.Profiles[0].StreamURI); err == nil {
+				if s := streams.Get(strings.Trim(u.Path, "/")); s != nil {
+					return s
+				}
+			}
+		}
+	}
+
+	// 2. Direct match by device / stream ID
+	if streamName, ok := deviceStreams[cleanPath]; ok {
+		if s := streams.Get(streamName); s != nil {
+			return s
+		}
+	}
+
+	if dev, ok := devices[cleanPath]; ok && len(dev.Profiles) > 0 {
+		if u, err := url.Parse(dev.Profiles[0].StreamURI); err == nil {
+			if s := streams.Get(strings.Trim(u.Path, "/")); s != nil {
+				return s
+			}
+		}
+	}
+
+	return nil
 }
 
 func findServerDevice(r *http.Request) *onvif.ServerDevice {

@@ -15,95 +15,54 @@ streams:
   tapo1: onvif://admin:password@192.168.1.123:2020
 ```
 
+---
+
 ## ONVIF Server
 
 Go2rtc can act as an ONVIF Profile S server to expose streams to NVRs (like **UniFi Protect 5+**, Synology Surveillance Station, Scrypted, Home Assistant, etc.).
 
 It includes a built-in **WS-Discovery responder** (UDP 3702 multicast) so NVRs can automatically discover virtual cameras on the local network.
 
-### 1. Default Shared Server Mode
+### 1. Automatic 1:1 Stream-to-Virtual Camera Mode (Recommended for UniFi Protect)
 
-By default, all streams configured in go2rtc are discoverable and available via the main API port:
-
-```yaml
-onvif:
-  server:
-    listen: ":8080" # optional custom port for ONVIF SOAP services
-    discovery: true # enable/disable WS-Discovery responder (default: true)
-```
-
-### 2. Virtual Camera Emulation (UniFi Protect / Dedicated IP Mode)
-
-UniFi Protect and some NVRs require each camera to have its own unique MAC and IP address on the local network:
+For UniFi Protect and NVRs requiring 1 IP per camera, `go2rtc` automatically creates an isolated virtual ONVIF camera (with a dedicated MacVLAN interface named `go2rtc_onvif_<index>`, unique MAC address, and DHCP IP) **for every stream** defined in `streams:`:
 
 ```yaml
 onvif:
-  devices:
-    front_camera:
-      name: FrontCam
-      dev: eth0                                  # Network interface for MacVLAN (Linux only)
-      # mac: 1A:11:B0:12:34:56                   # Auto-generated if omitted
-      # uuid: 44302cbf-0d18-4feb-79b3-33b575263da3 # Auto-generated if omitted
-      listen: "192.168.1.187:80"                 # Virtual IP to bind (or DHCP via MacVLAN)
-      profiles:
-        main:
-          stream: front_hq                       # go2rtc stream name
-          width: 2560
-          height: 1440
-          framerate: 25
-          bitrate: 4096
-        sub:
-          stream: front_lq
-          width: 640
-          height: 360
-          framerate: 15
-          bitrate: 1024
+  enabled: true      # Enable/disable virtual ONVIF camera generation (default: true)
+  dev: eth0          # Parent network interface for automatic MacVLAN + DHCP
+  discovery: true    # Enable WS-Discovery responder on 239.255.255.250:3702 (default: true)
+  http_port: 80      # HTTP port on virtual IP (default: 80)
+  rtsp_port: 8554    # RTSP port on virtual IP (default: 8554)
 
 streams:
-  front_hq: rtsp://192.168.1.50:554/live0
-  front_lq: rtsp://192.168.1.50:554/live1
+  cam-ber-0: rtsp://192.168.1.50:554/ch0
+  cam-ber-1: rtsp://192.168.1.51:554/ch0
+  cam-ta-1:  rtsp://192.168.1.52:554/ch0
 ```
 
-### 3. `rtsp-to-onvif` Compatibility Syntax
+*Every stream receives:*
+- Isolated MacVLAN interface (`go2rtc_onvif_0`, `go2rtc_onvif_1`, etc.).
+- Unique DHCP IP address (e.g. `192.168.1.181`, `192.168.1.182`).
+- Isolated ONVIF Profile S SOAP service exposing **only that single stream** as `MainStream`.
+- Snapshot endpoint (`http://<virtual_ip>:80/snapshot.png` redirecting to frame JPEG).
+- Automatic WS-Discovery advertisement.
 
-You can also use the configuration format from `rtsp-to-onvif`:
+### 2. Optional Per-Stream Customization
+
+You can optionally override settings for individual streams:
 
 ```yaml
 onvif:
-  - name: BulletCam
-    dev: eth0
-    highQuality:
-      rtsp: /Streaming/Channels/101/
-      width: 2048
-      height: 1536
-      framerate: 15
-      bitrate: 3072
-    ports:
-      server: 8081
-      rtsp: 8554
-      snapshot: 8080
+  dev: eth0
+  devices:
+    cam-ber-0:
+      name: "Front Yard Camera"
+      # mac: 1A:11:B0:12:34:56                   # Auto-generated & persisted if omitted
+      # ipv4: 192.168.1.181/24                   # Static IP if not using DHCP
+      # http_port: 8080
+      # rtsp_port: 554
+
+streams:
+  cam-ber-0: rtsp://192.168.1.50:554/ch0
 ```
-
-## Tested clients
-
-Go2rtc works as ONVIF server:
-
-- UniFi Protect 5+ (Adoption & Recording)
-- Synology Surveillance Station
-- Scrypted
-- Home Assistant ONVIF integration (linux)
-- Happytime onvif client (windows)
-- Onvier (android)
-- ONVIF Device Manager (windows)
-
-PS. Supports only TCP transport for RTSP protocol. UDP and HTTP transports - unsupported yet.
-
-## Tested cameras
-
-Go2rtc works as ONVIF client:
-
-- Dahua IPC-K42
-- OpenIPC
-- Reolink RLC-520A
-- TP-Link Tapo TC60
-
