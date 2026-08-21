@@ -1,6 +1,7 @@
 package onvif
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
@@ -15,9 +16,11 @@ type Envelope struct {
 }
 
 const (
-	prefix1 = `<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl">`
-	prefix2 = `<s:Body>`
-	suffix  = `</s:Body></s:Envelope>`
+	soap11Prefix = `<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl">`
+	soap12Prefix = `<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl">`
+	prefix1      = soap12Prefix
+	prefix2      = `<s:Body>`
+	suffix       = `</s:Body></s:Envelope>`
 
 	eventPrefix = `<?xml version="1.0" encoding="utf-8"?>` +
 		`<s:Envelope` +
@@ -31,6 +34,16 @@ const (
 func NewEnvelope() *Envelope {
 	e := &Envelope{buf: make([]byte, 0, 1024)}
 	e.Append(prefix1, prefix2)
+	return e
+}
+
+func NewEnvelopeForRequest(req []byte) *Envelope {
+	prefix := soap12Prefix
+	if len(req) > 0 && bytes.Contains(req, []byte("schemas.xmlsoap.org/soap/envelope")) {
+		prefix = soap11Prefix
+	}
+	e := &Envelope{buf: make([]byte, 0, 1024)}
+	e.Append(prefix, prefix2)
 	return e
 }
 
