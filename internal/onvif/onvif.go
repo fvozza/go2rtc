@@ -685,7 +685,7 @@ func startDeviceServer(ip string, preferredPort int, dev *onvif.ServerDevice, de
 		// Friendly device status page
 		if r.Method == "GET" && (r.URL.Path == "/" || r.URL.Path == "/onvif" || r.URL.Path == "/onvif/") {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(fmt.Sprintf("<html><body><h1>go2rtc Virtual ONVIF Camera</h1><p>Device: <b>%s</b></p><p>Stream: <b>%s</b></p><p><a href=\"/onvif/device_service\">/onvif/device_service</a></p></body></html>", devID, streamName)))
+			_, _ = w.Write(fmt.Appendf(nil, "<html><body><h1>go2rtc Virtual ONVIF Camera</h1><p>Device: <b>%s</b></p><p>Stream: <b>%s</b></p><p><a href=\"/onvif/device_service\">/onvif/device_service</a></p></body></html>", devID, streamName))
 			return
 		}
 

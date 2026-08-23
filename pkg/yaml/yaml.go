@@ -94,7 +94,7 @@ func patch(in []byte, path []string, value any) ([]byte, error) {
 			}
 
 			indent := pKey.Column + 1
-			if pVal.Content != nil && len(pVal.Content) > 0 {
+			if len(pVal.Content) > 0 {
 				indent = pVal.Content[0].Column - 1
 			}
 
@@ -109,9 +109,6 @@ func patch(in []byte, path []string, value any) ([]byte, error) {
 		for i := 0; i < len(nodes); i += 2 {
 			if nodes[i].Value == path[0] {
 				i0, i1 := nodeBounds(in, nodes[i])
-				if value == nil {
-					return join(in[:i0], in[i1:]), nil
-				}
 				paste, err := Encode(map[string]any{path[0]: value}, 2)
 				if err != nil {
 					return nil, err
