@@ -225,3 +225,24 @@ func TestGetCapabilities(t *testing.T) {
 		})
 	}
 }
+
+func TestMACUtils(t *testing.T) {
+	mac := GenerateNetworkMAC()
+	require.True(t, strings.HasPrefix(mac, "1A:11:B0:"))
+
+	norm, err := NormalizeMAC("1a:11:b0:12:34:56")
+	require.NoError(t, err)
+	require.Equal(t, "1a:11:b0:12:34:56", norm)
+
+	normUpper, err := NormalizeMAC("1A:11:B0:12:34:56")
+	require.NoError(t, err)
+	require.Equal(t, "1a:11:b0:12:34:56", normUpper)
+
+	normDash, err := NormalizeMAC("1a-11-b0-12-34-56")
+	require.NoError(t, err)
+	require.Equal(t, "1a:11:b0:12:34:56", normDash)
+
+	require.True(t, SameMAC("1A:11:B0:12:34:56", "1a:11:b0:12:34:56"))
+	require.True(t, SameMAC("1a-11-b0-12-34-56", "1A:11:B0:12:34:56"))
+	require.False(t, SameMAC("1A:11:B0:12:34:56", "1A:11:B0:12:34:57"))
+}

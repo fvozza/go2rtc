@@ -112,6 +112,34 @@ func TestPatch(t *testing.T) {
 			value:  map[string]any{"bin": "/usr/bin/ffmpeg"},
 			expect: "api:\n  listen: :1984\nffmpeg:\n  bin: /usr/bin/ffmpeg\n",
 		},
+		{
+			name:   "deep path insertion into existing section",
+			src:    "onvif:\n  dev: eth0\n",
+			path:   []string{"onvif", "devices", "cam1", "mac"},
+			value:  "1A:11:B0:12:34:56",
+			expect: "onvif:\n  dev: eth0\n  devices:\n    cam1:\n      mac: 1A:11:B0:12:34:56\n",
+		},
+		{
+			name:   "deep path insertion second item",
+			src:    "onvif:\n  dev: eth0\n  devices:\n    cam1:\n      mac: 1A:11:B0:12:34:56\n",
+			path:   []string{"onvif", "devices", "cam2", "mac"},
+			value:  "1A:11:B0:78:90:AB",
+			expect: "onvif:\n  dev: eth0\n  devices:\n    cam1:\n      mac: 1A:11:B0:12:34:56\n    cam2:\n      mac: 1A:11:B0:78:90:AB\n",
+		},
+		{
+			name:   "deep path update existing value",
+			src:    "onvif:\n  devices:\n    cam1:\n      mac: 1A:11:B0:12:34:56\n",
+			path:   []string{"onvif", "devices", "cam1", "mac"},
+			value:  "1A:11:B0:99:99:99",
+			expect: "onvif:\n  devices:\n    cam1:\n      mac: 1A:11:B0:99:99:99\n",
+		},
+		{
+			name:   "deep path in empty config",
+			src:    "",
+			path:   []string{"onvif", "devices", "cam1", "mac"},
+			value:  "1A:11:B0:12:34:56",
+			expect: "onvif:\n  devices:\n    cam1:\n      mac: 1A:11:B0:12:34:56\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

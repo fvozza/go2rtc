@@ -2,7 +2,6 @@ package yaml
 
 import (
 	"bytes"
-	"errors"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,6 +37,10 @@ func Patch(in []byte, path []string, value any) ([]byte, error) {
 }
 
 func patch(in []byte, path []string, value any) ([]byte, error) {
+	if len(path) == 0 {
+		return in, nil
+	}
+
 	var root yaml.Node
 	if err := yaml.Unmarshal(in, &root); err != nil {
 		// invalid yaml
@@ -45,60 +48,97 @@ func patch(in []byte, path []string, value any) ([]byte, error) {
 	}
 
 	// empty in
-	if len(root.Content) != 1 {
-		return addToEnd(in, path, value)
-	}
-
-	// yaml is not dict
-	if root.Content[0].Kind != yaml.MappingNode {
-		return nil, errors.New("yaml: can't patch")
-	}
-
-	// dict items list
-	nodes := root.Content[0].Content
-
-	n := len(path) - 1
-
-	var paste []byte
-	if value != nil {
-		var err error
-		if paste, err = Encode(map[string]any{path[n]: value}, 2); err != nil {
-			return nil, err
+	if len(root.Content) != 1 || root.Content[0].Kind != yaml.MappingNode {
+		if value == nil {
+			return in, nil
 		}
-	}
-
-	// top-level key
-	if n == 0 {
-		for i := 0; i < len(nodes); i += 2 {
-			if nodes[i].Value == path[0] {
-				i0, i1 := nodeBounds(in, nodes[i])
-				return join(in[:i0], paste, in[i1:]), nil
-			}
+		paste, err := Encode(buildNestedMap(path, value), 2)
+		if err != nil {
+			return nil, err
 		}
 		return join(in, paste), nil
 	}
 
-	// nested key
-	pKey, pVal := findNode(nodes, path[:n])
-	if pKey == nil {
-		return addToEnd(in, path, value)
-	}
+	nodes := root.Content[0].Content
+	n := len(path) - 1
 
-	iKey, _ := findNode(pVal.Content, path[n:])
-	if iKey != nil {
-		paste = addIndent(paste, iKey.Column-1)
-		i0, i1 := nodeBounds(in, iKey)
+	// Check if the exact leaf key already exists
+	leafKey, _ := findNode(nodes, path)
+	if leafKey != nil {
+		i0, i1 := nodeBounds(in, leafKey)
+		if value == nil {
+			// delete leaf key
+			return join(in[:i0], in[i1:]), nil
+		}
+		paste, err := Encode(map[string]any{path[n]: value}, 2)
+		if err != nil {
+			return nil, err
+		}
+		paste = addIndent(paste, leafKey.Column-1)
 		return join(in[:i0], paste, in[i1:]), nil
 	}
 
-	if pVal.Content != nil {
-		paste = addIndent(paste, pVal.Column-1)
-	} else {
-		paste = addIndent(paste, pKey.Column+1)
+	if value == nil {
+		// Key doesn't exist, deletion is no-op
+		return in, nil
 	}
 
-	_, i1 := nodeBounds(in, pKey)
-	return join(in[:i1], paste, in[i1:]), nil
+	// Find the longest matching parent prefix
+	for k := n; k >= 1; k-- {
+		pKey, pVal := findNode(nodes, path[:k])
+		if pKey != nil {
+			v := buildNestedMap(path[k:], value)
+			paste, err := Encode(v, 2)
+			if err != nil {
+				return nil, err
+			}
+
+			indent := pKey.Column + 1
+			if pVal.Content != nil && len(pVal.Content) > 0 {
+				indent = pVal.Content[0].Column - 1
+			}
+
+			paste = addIndent(paste, indent)
+			_, i1 := nodeBounds(in, pKey)
+			return join(in[:i1], paste, in[i1:]), nil
+		}
+	}
+
+	// Top level key exists?
+	if n == 0 {
+		for i := 0; i < len(nodes); i += 2 {
+			if nodes[i].Value == path[0] {
+				i0, i1 := nodeBounds(in, nodes[i])
+				if value == nil {
+					return join(in[:i0], in[i1:]), nil
+				}
+				paste, err := Encode(map[string]any{path[0]: value}, 2)
+				if err != nil {
+					return nil, err
+				}
+				return join(in[:i0], paste, in[i1:]), nil
+			}
+		}
+	}
+
+	// No matching prefix found, add to end
+	v := buildNestedMap(path, value)
+	paste, err := Encode(v, 2)
+	if err != nil {
+		return nil, err
+	}
+	return join(in, paste), nil
+}
+
+func buildNestedMap(path []string, value any) any {
+	if len(path) == 0 {
+		return value
+	}
+	res := map[string]any{path[len(path)-1]: value}
+	for i := len(path) - 2; i >= 0; i-- {
+		res = map[string]any{path[i]: res}
+	}
+	return res
 }
 
 func findNode(nodes []*yaml.Node, keys []string) (key, value *yaml.Node) {
@@ -138,29 +178,6 @@ func nodeBounds(in []byte, node *yaml.Node) (offset0, offset1 int) {
 	}
 
 	return
-}
-
-func addToEnd(in []byte, path []string, value any) ([]byte, error) {
-	if value == nil {
-		return nil, errors.New("yaml: path not exist")
-	}
-
-	var v any
-	switch len(path) {
-	case 1:
-		v = map[string]any{path[0]: value}
-	case 2:
-		v = map[string]map[string]any{path[0]: {path[1]: value}}
-	default:
-		return nil, errors.New("yaml: path not exist")
-	}
-
-	paste, err := Encode(v, 2)
-	if err != nil {
-		return nil, err
-	}
-
-	return join(in, paste), nil
 }
 
 func join(items ...[]byte) []byte {

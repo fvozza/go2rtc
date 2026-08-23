@@ -180,25 +180,63 @@ func GenerateNetworkMAC() string {
 	return fmt.Sprintf("1A:11:B0:%s:%s:%s", s[0:2], s[2:4], s[4:6])
 }
 
+// NormalizeMAC parses a MAC address string and returns its canonical colon-separated format.
+func NormalizeMAC(mac string) (string, error) {
+	hw, err := net.ParseMAC(strings.TrimSpace(mac))
+	if err != nil {
+		return "", err
+	}
+	return hw.String(), nil
+}
+
+// SameMAC compares two MAC addresses, returning true if they represent the same hardware address.
+func SameMAC(mac1, mac2 string) bool {
+	hw1, err1 := net.ParseMAC(strings.TrimSpace(mac1))
+	hw2, err2 := net.ParseMAC(strings.TrimSpace(mac2))
+	if err1 == nil && err2 == nil {
+		return hw1.String() == hw2.String()
+	}
+	return strings.EqualFold(strings.TrimSpace(mac1), strings.TrimSpace(mac2))
+}
+
+// FindInterfaceByMAC searches system network interfaces for an interface with the specified MAC address.
+func FindInterfaceByMAC(macAddress string) (*net.Interface, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	targetNorm, err := NormalizeMAC(macAddress)
+	targetLower := strings.ToLower(strings.TrimSpace(macAddress))
+	for _, iface := range ifaces {
+		if len(iface.HardwareAddr) == 0 {
+			continue
+		}
+		if err == nil {
+			if ifaceNorm, errNorm := NormalizeMAC(iface.HardwareAddr.String()); errNorm == nil && ifaceNorm == targetNorm {
+				return &iface, nil
+			}
+		}
+		if strings.ToLower(iface.HardwareAddr.String()) == targetLower {
+			return &iface, nil
+		}
+	}
+	return nil, nil
+}
+
 // GetIPv4FromMAC finds the IPv4 address assigned to the network interface with the given MAC address.
 func GetIPv4FromMAC(macAddress string) string {
-	ifaces, err := net.Interfaces()
+	iface, err := FindInterfaceByMAC(macAddress)
+	if err != nil || iface == nil {
+		return ""
+	}
+	addrs, err := iface.Addrs()
 	if err != nil {
 		return ""
 	}
-	targetMac := strings.ToLower(strings.TrimSpace(macAddress))
-	for _, iface := range ifaces {
-		if strings.ToLower(iface.HardwareAddr.String()) == targetMac {
-			addrs, err := iface.Addrs()
-			if err != nil {
-				continue
-			}
-			for _, addr := range addrs {
-				if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-					if ip4 := ipnet.IP.To4(); ip4 != nil {
-						return ip4.String()
-					}
-				}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ip4 := ipnet.IP.To4(); ip4 != nil {
+				return ip4.String()
 			}
 		}
 	}

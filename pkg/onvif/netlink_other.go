@@ -14,7 +14,7 @@ type SetupMacVLANResult struct {
 }
 
 // CleanupMacVLANInterfaces is a stub on non-Linux platforms.
-func CleanupMacVLANInterfaces(prefixes ...string) []string {
+func CleanupMacVLANInterfaces(preservedMACs []string, prefixes ...string) []string {
 	return nil
 }
 

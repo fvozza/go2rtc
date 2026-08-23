@@ -24,18 +24,19 @@ import (
 
 type Config struct {
 	Mod struct {
-		Enabled   *bool                    `yaml:"enabled"`   // master enable/disable toggle (default: true)
-		Dev       string                   `yaml:"dev"`       // parent interface for auto MacVLAN + DHCP (e.g. eth0)
-		Discovery *bool                    `yaml:"discovery"` // WS-Discovery responder (default: true)
-		HTTPPort  int                      `yaml:"http_port"` // HTTP port on virtual IP (default: 80)
-		RTSPPort  int                      `yaml:"rtsp_port"` // RTSP port on virtual IP (default: 8554)
-		Streams   []string                 `yaml:"streams"`   // explicit list of stream names to publish as virtual ONVIF cameras
-		Server    struct {
+		Enabled      *bool                    `yaml:"enabled"`   // master enable/disable toggle (default: true)
+		Dev          string                   `yaml:"dev"`       // parent interface for auto MacVLAN + DHCP (e.g. eth0)
+		Discovery    *bool                    `yaml:"discovery"` // WS-Discovery responder (default: true)
+		HTTPPort     int                      `yaml:"http_port"` // HTTP port on virtual IP (default: 80)
+		RTSPPort     int                      `yaml:"rtsp_port"` // RTSP port on virtual IP (default: 8554)
+		Streams      []string                 `yaml:"streams"`   // explicit list of stream names to publish as virtual ONVIF cameras
+		Server       struct {
 			Listen    string `yaml:"listen"`
 			Discovery *bool  `yaml:"discovery"`
 		} `yaml:"server"`
-		Devices map[string]*DeviceConfig `yaml:"devices"` // optional per-stream overrides
-		List    []*DeviceConfig          `yaml:"onvif"`   // list compatibility
+		Devices      map[string]*DeviceConfig `yaml:"devices"` // optional per-stream overrides
+		List         []*DeviceConfig          `yaml:"onvif"`   // list compatibility
+		StreamsIsMap bool                     `yaml:"-"`       // indicates streams was specified as map in YAML
 	} `yaml:"onvif"`
 }
 
@@ -48,7 +49,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 			Discovery *bool                    `yaml:"discovery"`
 			HTTPPort  int                      `yaml:"http_port"`
 			RTSPPort  int                      `yaml:"rtsp_port"`
-			Streams   []string                 `yaml:"streams"`
+			Streams   any                      `yaml:"streams"`
 			Server    struct {
 				Listen    string `yaml:"listen"`
 				Discovery *bool  `yaml:"discovery"`
@@ -58,8 +59,87 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 		} `yaml:"onvif"`
 	}
 	var standard rawStandard
-	if err := node.Decode(&standard); err == nil && (standard.Mod.Dev != "" || standard.Mod.Enabled != nil || len(standard.Mod.Streams) > 0 || len(standard.Mod.Devices) > 0 || len(standard.Mod.List) > 0 || standard.Mod.Server.Listen != "") {
-		c.Mod = standard.Mod
+	if err := node.Decode(&standard); err == nil && (standard.Mod.Dev != "" || standard.Mod.Enabled != nil || standard.Mod.Streams != nil || len(standard.Mod.Devices) > 0 || len(standard.Mod.List) > 0 || standard.Mod.Server.Listen != "") {
+		c.Mod.Enabled = standard.Mod.Enabled
+		c.Mod.Dev = standard.Mod.Dev
+		c.Mod.Discovery = standard.Mod.Discovery
+		c.Mod.HTTPPort = standard.Mod.HTTPPort
+		c.Mod.RTSPPort = standard.Mod.RTSPPort
+		c.Mod.Server = standard.Mod.Server
+		c.Mod.Devices = standard.Mod.Devices
+		c.Mod.List = standard.Mod.List
+		if c.Mod.Devices == nil {
+			c.Mod.Devices = make(map[string]*DeviceConfig)
+		}
+
+		if standard.Mod.Streams != nil {
+			switch v := standard.Mod.Streams.(type) {
+			case []any:
+				for _, item := range v {
+					switch s := item.(type) {
+					case string:
+						if s != "" {
+							c.Mod.Streams = append(c.Mod.Streams, s)
+						}
+					case map[string]any:
+						name, _ := s["name"].(string)
+						if name != "" {
+							c.Mod.Streams = append(c.Mod.Streams, name)
+							dev := &DeviceConfig{Name: name}
+							if mac, ok := s["mac"].(string); ok {
+								dev.MAC = mac
+							}
+							if ipv4, ok := s["ipv4"].(string); ok {
+								dev.IPv4 = ipv4
+							}
+							if devConf, exists := c.Mod.Devices[name]; exists {
+								if dev.MAC != "" && devConf.MAC == "" {
+									devConf.MAC = dev.MAC
+								}
+								if dev.IPv4 != "" && devConf.IPv4 == "" {
+									devConf.IPv4 = dev.IPv4
+								}
+							} else {
+								c.Mod.Devices[name] = dev
+							}
+						}
+					}
+				}
+			case map[string]any:
+				c.Mod.StreamsIsMap = true
+				for k, val := range v {
+					if k == "server" {
+						continue
+					}
+					c.Mod.Streams = append(c.Mod.Streams, k)
+					dev := &DeviceConfig{Name: k}
+					switch item := val.(type) {
+					case string:
+						dev.MAC = item
+					case map[string]any:
+						if mac, ok := item["mac"].(string); ok {
+							dev.MAC = mac
+						}
+						if ipv4, ok := item["ipv4"].(string); ok {
+							dev.IPv4 = ipv4
+						}
+						if devName, ok := item["name"].(string); ok && devName != "" {
+							dev.Name = devName
+						}
+					}
+					if devConf, exists := c.Mod.Devices[k]; exists {
+						if dev.MAC != "" && devConf.MAC == "" {
+							devConf.MAC = dev.MAC
+						}
+						if dev.IPv4 != "" && devConf.IPv4 == "" {
+							devConf.IPv4 = dev.IPv4
+						}
+					} else {
+						c.Mod.Devices[k] = dev
+					}
+				}
+			}
+		}
 		return nil
 	}
 
@@ -172,20 +252,6 @@ func initServers(cfg *Config) {
 		return
 	}
 
-	// 2. Clean up any existing virtual MacVLAN interfaces at startup
-	if cleaned := onvif.CleanupMacVLANInterfaces(); len(cleaned) > 0 {
-		log.Info().Strs("interfaces", cleaned).Msg("[onvif] cleaned up existing virtual MacVLAN interfaces at startup")
-	}
-
-	discoveryServer = onvif.NewDiscoveryServer()
-	discoveryServer.OnProbe = func(remoteAddr, probeUUID string, matchedDevices int) {
-		log.Debug().
-			Str("remote", remoteAddr).
-			Str("probe_id", probeUUID).
-			Int("matched", matchedDevices).
-			Msg("[onvif] ws-discovery probe received")
-	}
-
 	allDevs := make(map[string]*DeviceConfig)
 
 	// 2. Determine which streams/devices to publish:
@@ -221,7 +287,42 @@ func initServers(cfg *Config) {
 		return
 	}
 
-	// 3. Setup each 1:1 stream virtual camera
+	// 3. Collect preserved MACs from all configured streams (non-empty MACs)
+	var preservedMACs []string
+	macMap := make(map[string]string) // normalized MAC -> stream ID for duplicate check
+	for id, conf := range allDevs {
+		if conf.MAC != "" {
+			if normMAC, err := onvif.NormalizeMAC(conf.MAC); err == nil {
+				if existingID, dup := macMap[normMAC]; dup && existingID != id {
+					log.Warn().Str("mac", conf.MAC).Str("stream1", existingID).Str("stream2", id).
+						Msg("[onvif] duplicate MAC address configured across multiple streams")
+				} else {
+					macMap[normMAC] = id
+				}
+				preservedMACs = append(preservedMACs, conf.MAC)
+			} else {
+				log.Warn().Str("stream", id).Str("mac", conf.MAC).Err(err).
+					Msg("[onvif] invalid custom MAC address format in config, generating new MAC")
+				conf.MAC = ""
+			}
+		}
+	}
+
+	// 4. Clean up any existing virtual MacVLAN interfaces at startup, preserving those with configured MACs
+	if cleaned := onvif.CleanupMacVLANInterfaces(preservedMACs); len(cleaned) > 0 {
+		log.Info().Strs("interfaces", cleaned).Msg("[onvif] cleaned up stale virtual MacVLAN interfaces at startup")
+	}
+
+	discoveryServer = onvif.NewDiscoveryServer()
+	discoveryServer.OnProbe = func(remoteAddr, probeUUID string, matchedDevices int) {
+		log.Debug().
+			Str("remote", remoteAddr).
+			Str("probe_id", probeUUID).
+			Int("matched", matchedDevices).
+			Msg("[onvif] ws-discovery probe received")
+	}
+
+	// 5. Setup each 1:1 stream virtual camera
 	idx := 0
 	for id, devConf := range allDevs {
 		setupDevice(id, devConf, cfg, idx)
@@ -260,17 +361,24 @@ func setupDevice(id string, conf *DeviceConfig, globalCfg *Config, idx int) {
 
 	log.Info().Str("device", id).Str("stream", streamName).Msg("[onvif] initializing 1:1 virtual ONVIF device...")
 
-	if conf.UUID == "" {
-		conf.UUID = onvif.UUID()
-		_ = app.PatchConfig([]string{"onvif", "devices", id, "uuid"}, conf.UUID)
+	patchKey := "devices"
+	if globalCfg.Mod.StreamsIsMap {
+		patchKey = "streams"
 	}
 
-	// 1. MacVLAN Provisioning (strictly go2rtc_<idx>)
+	if conf.UUID == "" {
+		conf.UUID = onvif.UUID()
+		_ = app.PatchConfig([]string{"onvif", patchKey, id, "uuid"}, conf.UUID)
+	}
+
+	// 1. MacVLAN Provisioning
 	if conf.Dev != "" {
 		if conf.MAC == "" {
 			conf.MAC = onvif.GenerateNetworkMAC()
-			log.Info().Str("device", id).Str("mac", conf.MAC).Msg("[onvif] generated LAA MAC address")
-			_ = app.PatchConfig([]string{"onvif", "devices", id, "mac"}, conf.MAC)
+			log.Info().Str("device", id).Str("mac", conf.MAC).Msg("[onvif] generated and persisted LAA MAC address")
+			if err := app.PatchConfig([]string{"onvif", patchKey, id, "mac"}, conf.MAC); err != nil {
+				log.Debug().Err(err).Str("device", id).Msg("[onvif] unable to persist MAC to config")
+			}
 		}
 
 		vlanName := fmt.Sprintf("go2rtc_%d", idx)
@@ -278,7 +386,6 @@ func setupDevice(id string, conf *DeviceConfig, globalCfg *Config, idx int) {
 		log.Info().
 			Str("device", id).
 			Str("parent_dev", conf.Dev).
-			Str("vlan_name", vlanName).
 			Str("mac", conf.MAC).
 			Str("static_ip", conf.IPv4).
 			Msg("[onvif] configuring MacVLAN interface...")
@@ -288,13 +395,12 @@ func setupDevice(id string, conf *DeviceConfig, globalCfg *Config, idx int) {
 			log.Error().Err(err).
 				Str("device", id).
 				Str("dev", conf.Dev).
-				Str("vlan", vlanName).
 				Str("mac", conf.MAC).
 				Msg("[onvif] MacVLAN setup error")
 		} else {
 			log.Info().
 				Str("device", id).
-				Str("vlan", vlanName).
+				Str("vlan", res.VLANName).
 				Bool("created", res.Created).
 				Str("dhcp_client", res.DHCPClient).
 				Str("dhcp_output", res.DHCPOutput).
